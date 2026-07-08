@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/types.ts","./src/api/finnhub.ts","./src/api/settrade.ts","./src/api/twelvedata.ts","./src/api/yahoo.ts","./src/components/candlechart.tsx"],"version":"5.9.3"}
