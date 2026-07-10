@@ -34,3 +34,11 @@ export interface DateMark {
   time: number // unix timestamp, seconds
   label: string
 }
+
+export interface DroppedFile {
+  data: string // base64, no data-URL prefix
+  mediaType: string
+  name: string
+}
+
+export type InputMode = 'link' | 'file' | 'text'

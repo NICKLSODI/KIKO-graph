@@ -4,11 +4,19 @@
 
 body {
   margin: 0;
-  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
-  background: #0f1115;
-  color: #e6e6e6;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Tahoma, sans-serif;
+  background: #f7f6f1;
+  color: #27261f;
 }
 
 input, select, button {
   font: inherit;
+}
+
+.spin {
+  display: inline-block;
+  animation: spin 1.4s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }

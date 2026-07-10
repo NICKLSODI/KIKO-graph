@@ -1,45 +1,17 @@
 import type { Candle } from '../types'
 
-interface TwelveDataValue {
-  datetime: string
-  open: string
-  high: string
-  low: string
-  close: string
-}
+const BACKEND_URL = 'http://localhost:8000'
 
-interface TwelveDataResponse {
-  status: string
-  message?: string
-  values?: TwelveDataValue[]
-}
-
-export async function fetchCandles(
-  symbol: string,
-  interval: string,
-  apiKey: string,
-): Promise<Candle[]> {
-  const url = new URL('https://api.twelvedata.com/time_series')
+// Foreign (US) stock candles via the backend, which holds the Twelve Data key (backend/.env).
+export async function fetchForeignCandles(symbol: string, interval: string): Promise<Candle[]> {
+  const url = new URL(`${BACKEND_URL}/candles-twelvedata`)
   url.searchParams.set('symbol', symbol)
   url.searchParams.set('interval', interval)
-  url.searchParams.set('outputsize', '300')
-  url.searchParams.set('apikey', apiKey)
 
   const res = await fetch(url.toString())
-  const data: TwelveDataResponse = await res.json()
-
-  if (data.status === 'error') {
-    throw new Error(data.message ?? 'Twelve Data request failed')
+  if (!res.ok) {
+    const body = await res.json().catch(() => null)
+    throw new Error(body?.detail ?? `Twelve Data request failed (${res.status})`)
   }
-
-  const values = data.values ?? []
-  return values
-    .map((v) => ({
-      time: Math.floor(new Date(v.datetime.replace(' ', 'T') + 'Z').getTime() / 1000),
-      open: Number(v.open),
-      high: Number(v.high),
-      low: Number(v.low),
-      close: Number(v.close),
-    }))
-    .reverse()
+  return res.json()
 }

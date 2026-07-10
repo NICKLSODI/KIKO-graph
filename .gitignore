@@ -2,4 +2,10 @@ node_modules
 dist
 .DS_Store
 backend/.env
+backend/.venv
 backend/__pycache__
+
+# build artifacts / caches (regenerated automatically)
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
