@@ -9,9 +9,10 @@ export interface RetrievedProductData {
   summary: string
   productName: string | null
   productType: string | null
-  strike: number | null
-  knockIn: number | null
-  knockOut: number | null
+  strike: number | null // % of initial reference price
+  knockIn: number | null // % of initial reference price
+  knockOut: number | null // % of initial reference price
+  fixingDate: string | null // YYYY-MM-DD, the initial strike/fixing date — needed to resolve % levels to real prices
   observationDates: string[]
   maturityDate: string | null
   /** Primary underlying reference ticker (e.g. AAPL, NVDA, PTT), for the graph. */
@@ -29,9 +30,10 @@ export const EXTRACTION_INSTRUCTIONS = `คุณเป็นผู้ช่ว�
   "summary": string,               // สรุปผลิตภัณฑ์ 3-5 บรรทัด ภาษาไทย
   "productName": string | null,    // ชื่อผลิตภัณฑ์ถ้าระบุ
   "productType": string | null,    // ประเภทผลิตภัณฑ์ เช่น KIKO, Twin Win, FCN
-  "strike": number | null,         // ระดับ Strike Price ถ้ามี (ตัวเลขล้วน ไม่มี % หรือสัญลักษณ์)
-  "knockIn": number | null,        // ระดับ Knock-In ถ้ามี
-  "knockOut": number | null,       // ระดับ Knock-Out ถ้ามี
+  "strike": number | null,         // ระดับ Strike เป็น % ของราคาเริ่มต้น (ตัวเลขล้วน เช่น 100 ไม่ใช่ "100%")
+  "knockIn": number | null,        // ระดับ Knock-In เป็น % ของราคาเริ่มต้น (null ถ้าไม่มี)
+  "knockOut": number | null,       // ระดับ Knock-Out เป็น % ของราคาเริ่มต้น (null ถ้าไม่มี)
+  "fixingDate": string | null,     // วัน strike/fixing เริ่มต้น รูปแบบ YYYY-MM-DD — จำเป็นสำหรับแปลง % เป็นราคาจริง
   "observationDates": string[],    // วันที่สังเกตการณ์ราคา รูปแบบ YYYY-MM-DD ถ้าระบุ (ว่างได้ถ้าไม่มี)
   "maturityDate": string | null,   // วันครบกำหนด รูปแบบ YYYY-MM-DD ถ้าระบุ
   "underlyingSymbol": string | null, // สัญลักษณ์หุ้นอ้างอิงหลัก (ticker) เช่น AAPL, NVDA, PTT — ถ้ามีหลายตัวให้เลือกตัวหลัก ถ้าไม่แน่ใจใส่ null
@@ -78,6 +80,7 @@ export function parseExtraction(raw: string): RetrievedProductData {
     strike: num(parsed.strike),
     knockIn: num(parsed.knockIn),
     knockOut: num(parsed.knockOut),
+    fixingDate: str(parsed.fixingDate),
     observationDates: Array.isArray(parsed.observationDates) ? parsed.observationDates.filter((d) => typeof d === 'string') : [],
     maturityDate: str(parsed.maturityDate),
     underlyingSymbol: str(parsed.underlyingSymbol),

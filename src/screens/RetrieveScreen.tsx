@@ -29,7 +29,7 @@ function DataPreview({ data }: { data: RetrievedProductData }) {
         <div><b>สรุป:</b> {data.summary || '-'}</div>
         <div><b>ชื่อผลิตภัณฑ์:</b> {data.productName ?? '-'} &nbsp;|&nbsp; <b>ประเภท:</b> {data.productType ?? '-'}</div>
         <div><b>หุ้นอ้างอิง:</b> {data.underlyingSymbol ?? '-'} {data.market ? `(${data.market === 'thai' ? 'ไทย' : 'ต่างประเทศ'})` : ''}</div>
-        <div><b>Strike:</b> {data.strike ?? '-'} &nbsp;|&nbsp; <b>Knock-In:</b> {data.knockIn ?? '-'} &nbsp;|&nbsp; <b>Knock-Out:</b> {data.knockOut ?? '-'}</div>
+        <div><b>Strike:</b> {data.strike != null ? `${data.strike}%` : '-'} &nbsp;|&nbsp; <b>Knock-In:</b> {data.knockIn != null ? `${data.knockIn}%` : '-'} &nbsp;|&nbsp; <b>Knock-Out:</b> {data.knockOut != null ? `${data.knockOut}%` : '-'}</div>
         <div><b>วันครบกำหนด:</b> {data.maturityDate ?? '-'}</div>
         <div><b>วันสังเกตการณ์:</b> {data.observationDates.length ? data.observationDates.join(', ') : '-'}</div>
       </div>

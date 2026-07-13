@@ -13,6 +13,7 @@ export const NOTE_EXTRACTION_INSTRUCTIONS = `คุณเป็นผู้เ�
   "productCode": string | null,        // รหัสผลิตภัณฑ์ เช่น SG2606256MKIKOU
   "issuer": string | null,             // ผู้ออก เช่น SG, BNPP
   "underlyings": string[],             // หุ้นอ้างอิงทุกตัว (ticker) เช่น ["AMD","MRVL"] — ถ้า basket ต้องครบทุกตัว
+  "initialPrices": number[],           // ราคาเริ่มต้น/ราคาอ้างอิง (Initial/Underlying Price) ของหุ้นแต่ละตัว "เรียงลำดับให้ตรงกับ underlyings ทีละตัว" — เอาตัวเลขจริงจากตารางในเอกสาร (เช่น "Underlying price as of ...") ห้ามคำนวณเอง ถ้าตัวใดไม่มีในเอกสารให้เว้นว่างเป็น [] ทั้งชุด
   "market": "thai" | "foreign",        // ตลาดของหุ้นอ้างอิง (foreign=US/ต่างประเทศ)
   "structureType": string,             // ประเภทโครงสร้าง เลือกจาก: KIKO, KO-only, Memory/Snowball, Phoenix, Airbag/Buffer, Twin-Win, Other
   "strikePct": number | null,          // ระดับ Strike เป็น % ของราคาเริ่มต้น (ตัวเลขล้วน เช่น 100)
@@ -23,6 +24,7 @@ export const NOTE_EXTRACTION_INSTRUCTIONS = `คุณเป็นผู้เ�
   "fixingDate": string | null,         // วัน strike/fixing เริ่มต้น รูปแบบ YYYY-MM-DD
   "observationDates": string[],        // วันสังเกตการณ์ทั้งหมด รูปแบบ YYYY-MM-DD
   "koObservationDates": string[],      // วันสังเกตการณ์ KO โดยเฉพาะ (ถ้าระบุแยก) รูปแบบ YYYY-MM-DD
+  "koObservationFrequency": "daily" | "monthly" | "quarterly" | null, // ถ้าเอกสารบอกแค่ความถี่ (เช่น "Monthly Observe", "Daily Observe") แทนที่จะมี list วันที่ชัดเจน ให้ใส่ความถี่ตรงนี้แทน — ถ้ามี koObservationDates ชัดเจนอยู่แล้วใส่ null ก็ได้
   "summary": string                    // สรุปผลิตภัณฑ์ 2-4 บรรทัด ภาษาไทย
 }
 
@@ -45,9 +47,16 @@ function str(v: unknown): string | null {
 function strArr(v: unknown): string[] {
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map((x) => x.trim()) : []
 }
+function numArr(v: unknown): number[] {
+  return Array.isArray(v) ? v.map(num).filter((x): x is number => x != null) : []
+}
 function structureOf(v: unknown): StructureType {
   const s = str(v)
   return (STRUCTURE_TYPES as string[]).includes(s ?? '') ? (s as StructureType) : 'Other'
+}
+function frequencyOf(v: unknown): 'daily' | 'monthly' | 'quarterly' | null {
+  const s = str(v)?.toLowerCase()
+  return s === 'daily' || s === 'monthly' || s === 'quarterly' ? s : null
 }
 
 // Parse "6M", "1Y", "12 เดือน", "1 ปี" → months.
@@ -78,6 +87,7 @@ export function parseNoteProduct(raw: string, sourceFile: string, id: string): N
     productCode: str(p.productCode),
     issuer: str(p.issuer),
     underlyings: strArr(p.underlyings).map((s) => s.toUpperCase()),
+    initialPrices: numArr(p.initialPrices),
     market,
     structureType: structureOf(p.structureType),
     strikePct: num(p.strikePct),
@@ -89,15 +99,30 @@ export function parseNoteProduct(raw: string, sourceFile: string, id: string): N
     fixingDate: str(p.fixingDate),
     observationDates: strArr(p.observationDates),
     koObservationDates: strArr(p.koObservationDates),
+    koObservationFrequency: frequencyOf(p.koObservationFrequency),
     summary: str(p.summary) ?? '',
     raw,
     sourceFile,
   }
 }
 
-/** Extract one product per uploaded file via local Claude Code (reads the PDF). */
-export async function extractNote(file: GenerateFile, id: string): Promise<NoteProduct> {
-  const prompt = `${NOTE_EXTRACTION_INSTRUCTIONS}\n\nเอกสาร Term Sheet แนบเป็นไฟล์ (${file.name})`
-  const text = await generate(prompt, file)
-  return parseNoteProduct(text, file.name, id)
+export type NoteSource =
+  | { kind: 'file'; file: GenerateFile; label: string }
+  | { kind: 'link'; link: string; label: string }
+  | { kind: 'text'; text: string; label: string }
+
+/** Extract one product per source (file, web link, or pasted text) via local Claude Code. */
+export async function extractNote(source: NoteSource, id: string): Promise<NoteProduct> {
+  let text: string
+  if (source.kind === 'file') {
+    const prompt = `${NOTE_EXTRACTION_INSTRUCTIONS}\n\nเอกสาร Term Sheet แนบเป็นไฟล์ (${source.file.name})`
+    text = await generate(prompt, source.file)
+  } else if (source.kind === 'link') {
+    const prompt = `${NOTE_EXTRACTION_INSTRUCTIONS}\n\nเอกสาร Term Sheet (Web Link): ${source.link}\nกรุณาเปิดลิงก์นี้เพื่ออ่านเนื้อหาก่อนตอบ`
+    text = await generate(prompt)
+  } else {
+    const prompt = `${NOTE_EXTRACTION_INSTRUCTIONS}\n\nเอกสาร Term Sheet (ข้อความที่ผู้ใช้ป้อน):\n${source.text}`
+    text = await generate(prompt)
+  }
+  return parseNoteProduct(text, source.label, id)
 }

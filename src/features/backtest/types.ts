@@ -16,6 +16,7 @@ export interface NoteProduct {
   productCode: string | null
   issuer: string | null
   underlyings: string[] // tickers, e.g. ["AMD", "MRVL"]
+  initialPrices: number[] // reference price per underlying AS STATED IN THE TERM SHEET, same order as underlyings — [] if not printed in the doc
   market: MarketHint // where the underlyings trade (drives the price source)
   structureType: StructureType
   strikePct: number | null // % of initial reference price
@@ -27,6 +28,7 @@ export interface NoteProduct {
   fixingDate: string | null // YYYY-MM-DD, the initial strike/fixing date
   observationDates: string[] // all observation dates (YYYY-MM-DD)
   koObservationDates: string[] // KO observation dates specifically
+  koObservationFrequency: 'daily' | 'monthly' | 'quarterly' | null // cadence, used when the doc gives no explicit date list (e.g. "Monthly Observe")
   summary: string
   raw: string // raw model output, for the Details tab / debugging
   sourceFile: string // which uploaded file this came from
@@ -38,7 +40,8 @@ export type Verdict = 'pass' | 'knocked'
 export interface UnderlyingSeries {
   symbol: string
   candles: { time: number; open: number; high: number; low: number; close: number }[]
-  initialPrice: number | null // close on/after fixing date
+  initialPrice: number | null // the term sheet's stated price if given, else close on/after fixing date
+  fixingTime: number | null // unix time of the candle used as initialPrice (contract start marker)
   strikeLevel: number | null
   kiLevel: number | null
   koLevel: number | null
@@ -52,6 +55,8 @@ export interface BacktestResult {
   knockedIn: boolean
   knockedOut: boolean
   bufferPct: number | null // worst-of distance from current price to KI level (%)
+  volatilityPct: number | null // worst-of annualised volatility (%), from the backtest window
+  windowMonths: number // the lookback window this result was computed over
   series: UnderlyingSeries[]
   error: string | null // if prices couldn't be fetched
 }
@@ -62,6 +67,7 @@ export interface ScoreWeights {
   coupon: number
   buffer: number
   tenor: number
+  volatility: number
 }
 
 export interface ScoredProduct {

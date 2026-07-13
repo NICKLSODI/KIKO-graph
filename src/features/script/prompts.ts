@@ -125,9 +125,9 @@ export function factsText(data: RetrievedProductData): string {
     `สรุป: ${data.summary || '-'}`,
     `ชื่อผลิตภัณฑ์: ${data.productName ?? 'ไม่มีข้อมูลนี้ระบุไว้ในเอกสาร'}`,
     `ประเภทผลิตภัณฑ์: ${data.productType ?? 'ไม่มีข้อมูลนี้ระบุไว้ในเอกสาร'}`,
-    `Strike: ${data.strike ?? 'ไม่มีข้อมูลนี้ระบุไว้ในเอกสาร'}`,
-    `Knock-In: ${data.knockIn ?? 'ไม่มีข้อมูลนี้ระบุไว้ในเอกสาร'}`,
-    `Knock-Out: ${data.knockOut ?? 'ไม่มีข้อมูลนี้ระบุไว้ในเอกสาร'}`,
+    `Strike: ${data.strike != null ? `${data.strike}%` : 'ไม่มีข้อมูลนี้ระบุไว้ในเอกสาร'}`,
+    `Knock-In: ${data.knockIn != null ? `${data.knockIn}%` : 'ไม่มีข้อมูลนี้ระบุไว้ในเอกสาร'}`,
+    `Knock-Out: ${data.knockOut != null ? `${data.knockOut}%` : 'ไม่มีข้อมูลนี้ระบุไว้ในเอกสาร'}`,
     `วันครบกำหนด: ${data.maturityDate ?? 'ไม่มีข้อมูลนี้ระบุไว้ในเอกสาร'}`,
     `วันสังเกตการณ์: ${data.observationDates.length ? data.observationDates.join(', ') : 'ไม่มีข้อมูลนี้ระบุไว้ในเอกสาร'}`,
   ]

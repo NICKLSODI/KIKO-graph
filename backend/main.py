@@ -1,5 +1,7 @@
 import base64
+import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -35,6 +37,12 @@ YAHOO_RANGE_MAP = {
 # Path to the Claude Code CLI. Resolved once at startup.
 CLAUDE_BIN = shutil.which("claude")
 CLAUDE_TIMEOUT_SECONDS = 180
+
+# Path to the NotebookLM CLI (`nlm`). Used for term-sheet extraction instead of Claude.
+NLM_BIN = shutil.which("nlm")
+NLM_TIMEOUT_SECONDS = 180
+NLM_NOTEBOOK_TITLE = "KIKO Extraction"
+NLM_NOTEBOOK_ID_FILE = os.path.join(os.path.dirname(__file__), ".nlm_notebook_id")
 
 app = FastAPI()
 app.add_middleware(
@@ -189,3 +197,204 @@ def generate(payload: dict = Body(...)):
         raise HTTPException(status_code=502, detail=f"Claude Code error: {detail[:500]}")
 
     return {"text": (proc.stdout or "").strip()}
+
+
+# ── NotebookLM extraction (used for term-sheet extraction instead of Claude) ──
+
+def _run_nlm(args: list, input_text: str | None = None, timeout: int = NLM_TIMEOUT_SECONDS) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [NLM_BIN, *args],
+        input=input_text,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=timeout,
+    )
+
+
+def _nlm_json(proc: subprocess.CompletedProcess) -> dict | list | None:
+    out = (proc.stdout or "").strip()
+    try:
+        return json.loads(out)
+    except ValueError:
+        match = re.search(r"[\{\[][\s\S]*[\}\]]", out)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except ValueError:
+                return None
+    return None
+
+
+def _source_ids(notebook_id: str) -> set:
+    list_proc = _run_nlm(["source", "list", notebook_id, "--json"])
+    data = _nlm_json(list_proc) or []
+    sources = data if isinstance(data, list) else data.get("sources", [])
+    ids = set()
+    for s in sources if isinstance(sources, list) else []:
+        if isinstance(s, dict) and isinstance(s.get("id"), str):
+            ids.add(s["id"])
+    return ids
+
+
+def _first_id(obj) -> str | None:
+    """Best-effort extraction of an id-like field from nlm's --json output."""
+    if isinstance(obj, dict):
+        for key in ("id", "source_id", "sourceId", "notebook_id", "notebookId"):
+            if isinstance(obj.get(key), str):
+                return obj[key]
+        for v in obj.values():
+            found = _first_id(v)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = _first_id(item)
+            if found:
+                return found
+    return None
+
+
+NLM_LOGIN_TIMEOUT_SECONDS = 300
+
+
+def _ensure_nlm_login() -> None:
+    """Runs `nlm login` automatically (opens a browser) if the session has expired."""
+    check = _run_nlm(["login", "--check"], timeout=20)
+    if check.returncode == 0:
+        return
+    login_proc = _run_nlm(["login"], timeout=NLM_LOGIN_TIMEOUT_SECONDS)
+    if login_proc.returncode != 0:
+        detail = (login_proc.stderr or login_proc.stdout or "").strip() or "เข้าสู่ระบบ nlm ไม่สำเร็จ"
+        raise HTTPException(status_code=502, detail=f"nlm login ไม่สำเร็จ: {detail[:400]}")
+
+
+def _get_or_create_notebook() -> str:
+    if os.path.exists(NLM_NOTEBOOK_ID_FILE):
+        with open(NLM_NOTEBOOK_ID_FILE, "r", encoding="utf-8") as fh:
+            cached = fh.read().strip()
+        if cached:
+            return cached
+
+    list_proc = _run_nlm(["notebook", "list", "--json"])
+    data = _nlm_json(list_proc) or []
+    notebooks = data if isinstance(data, list) else data.get("notebooks", [])
+    for nb in notebooks if isinstance(notebooks, list) else []:
+        if isinstance(nb, dict) and nb.get("title") == NLM_NOTEBOOK_TITLE:
+            nb_id = nb.get("id")
+            if nb_id:
+                with open(NLM_NOTEBOOK_ID_FILE, "w", encoding="utf-8") as fh:
+                    fh.write(nb_id)
+                return nb_id
+
+    create_proc = _run_nlm(["notebook", "create", NLM_NOTEBOOK_TITLE, "--json"])
+    if create_proc.returncode != 0:
+        detail = (create_proc.stderr or create_proc.stdout or "").strip()
+        raise HTTPException(status_code=502, detail=f"สร้าง NotebookLM notebook ไม่สำเร็จ: {detail[:400]}")
+    nb_id = _first_id(_nlm_json(create_proc))
+    if not nb_id:
+        raise HTTPException(status_code=502, detail="สร้าง notebook สำเร็จ แต่หา notebook id ไม่เจอในผลลัพธ์")
+    with open(NLM_NOTEBOOK_ID_FILE, "w", encoding="utf-8") as fh:
+        fh.write(nb_id)
+    return nb_id
+
+
+@app.get("/api/extract-notebooklm/health")
+def extract_notebooklm_health():
+    if not NLM_BIN:
+        return {"available": False, "reason": "ไม่พบคำสั่ง nlm บนเครื่อง"}
+    check = _run_nlm(["login", "--check"], timeout=20)
+    return {"available": check.returncode == 0, "bin": NLM_BIN}
+
+
+@app.post("/api/extract-notebooklm")
+def extract_notebooklm(payload: dict = Body(...)):
+    """Extracts term-sheet data via NotebookLM (nlm CLI) instead of Claude Code.
+
+    payload: { instructions: str, source: { kind: 'text'|'link'|'file', text?, link?, file?: {name, mediaType, base64} } }
+    Adds the document as a NotebookLM source, queries it with the extraction
+    instructions, then deletes the source (keeps the notebook clean).
+    """
+    payload = payload or {}
+    instructions = payload.get("instructions", "")
+    source = payload.get("source") or {}
+    kind = source.get("kind")
+    if not isinstance(instructions, str) or not instructions.strip():
+        raise HTTPException(status_code=400, detail="instructions is required")
+    if kind not in ("text", "link", "file"):
+        raise HTTPException(status_code=400, detail="source.kind ต้องเป็น text, link, หรือ file")
+    if not NLM_BIN:
+        raise HTTPException(status_code=500, detail="ไม่พบคำสั่ง nlm บนเครื่อง — ติดตั้ง notebooklm-mcp-cli ก่อน")
+
+    _ensure_nlm_login()
+    notebook_id = _get_or_create_notebook()
+
+    tmpdir = None
+    # `source add` has no --json flag, so resolve the new source's id by diffing
+    # the notebook's source list before/after the add instead of parsing its output.
+    add_args = ["source", "add", notebook_id, "--wait"]
+    if kind == "text":
+        text = (source.get("text") or "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="source.text is required")
+        add_args += ["--text", text, "--title", "Term Sheet"]
+    elif kind == "link":
+        link = (source.get("link") or "").strip()
+        if not link:
+            raise HTTPException(status_code=400, detail="source.link is required")
+        add_args += ["--url", link]
+    else:
+        file = source.get("file")
+        if not isinstance(file, dict) or not file.get("base64"):
+            raise HTTPException(status_code=400, detail="source.file is required")
+        tmpdir = tempfile.mkdtemp(prefix="kiko_nlm_")
+        fpath = os.path.join(tmpdir, os.path.basename(file.get("name") or "document"))
+        try:
+            with open(fpath, "wb") as fh:
+                fh.write(base64.b64decode(file["base64"]))
+        except Exception:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            raise HTTPException(status_code=400, detail="ไฟล์แนบไม่ถูกต้อง (decode ไม่สำเร็จ)")
+        add_args += ["--file", fpath]
+
+    source_id = None
+    try:
+        before_ids = _source_ids(notebook_id)
+        add_proc = _run_nlm(add_args)
+        if add_proc.returncode != 0:
+            detail = (add_proc.stderr or add_proc.stdout or "").strip() or "เพิ่มเอกสารเข้า NotebookLM ไม่สำเร็จ"
+            raise HTTPException(status_code=502, detail=f"NotebookLM error: {detail[:500]}")
+        new_ids = _source_ids(notebook_id) - before_ids
+        if len(new_ids) == 1:
+            source_id = next(iter(new_ids))
+
+        query_args = ["notebook", "query", notebook_id, instructions, "--json"]
+        if source_id:
+            query_args += ["--source-ids", source_id]
+        query_proc = _run_nlm(query_args)
+        if query_proc.returncode != 0:
+            detail = (query_proc.stderr or query_proc.stdout or "").strip() or "สอบถาม NotebookLM ไม่สำเร็จ"
+            raise HTTPException(status_code=502, detail=f"NotebookLM error: {detail[:500]}")
+
+        data = _nlm_json(query_proc)
+        answer = None
+        if isinstance(data, dict):
+            for key in ("answer", "response", "text", "output", "content"):
+                if isinstance(data.get(key), str):
+                    answer = data[key]
+                    break
+        if not answer:
+            answer = (query_proc.stdout or "").strip()
+        if not answer:
+            raise HTTPException(status_code=502, detail="NotebookLM ไม่ได้ส่งคำตอบกลับมา")
+        return {"text": answer}
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="NotebookLM ใช้เวลานานเกินไป (timeout)")
+    finally:
+        if source_id:
+            try:
+                _run_nlm(["source", "delete", source_id, "--confirm"], timeout=30)
+            except Exception:
+                pass
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
