@@ -7,9 +7,13 @@ export function koTimesFor(product: NoteProduct): DateMark[] {
   return (product.koObservationDates.length ? product.koObservationDates : product.observationDates)
     .map((d): DateMark | null => {
       const t = Math.floor(new Date(d + 'T00:00:00Z').getTime() / 1000)
-      return Number.isFinite(t) ? { id: `ko-${d}`, time: t, label: `KO obs ${d}` } : null
+      return Number.isFinite(t) ? { id: `ko-${d}`, time: t, label: '' } : null
     })
     .filter((m): m is DateMark => m !== null)
+    .sort((a, b) => a.time - b.time)
+    // Short ordinal labels ("obs1", "obs2", …) — full dates cluttered the chart; the
+    // exact dates are still listed in the detail facts ("วันสังเกตการณ์ KO").
+    .map((m, i) => ({ ...m, label: `obs${i + 1}` }))
 }
 
 export function levelsAndMarksFor(s: UnderlyingSeries, koTimes: DateMark[]): { levels: Level[]; marks: DateMark[] } {

@@ -90,6 +90,7 @@ const product1: NoteProduct = {
   observationDates: ['2026-02-05', '2026-03-05', '2026-04-05', '2026-05-05', '2026-06-05', '2026-07-05'],
   koObservationDates: ['2026-02-05', '2026-03-05', '2026-04-05', '2026-05-05', '2026-06-05', '2026-07-05'],
   koObservationFrequency: null,
+  koType: 'memory',
   summary: 'KIKO ที่มี AAPL และ MSFT เป็นหุ้นอ้างอิง อัตราดอกเบี้ย 12% ต่อปี ชน KI ที่ 75% และ KO ที่ 105%',
   raw: 'Raw term sheet data for AAPL/MSFT',
   sourceFile: 'term_sheet_aapl_msft.pdf',
@@ -103,6 +104,7 @@ const backtest1: BacktestResult = {
   volatilityPct: 22.4,
   windowMonths: 6,
   error: null,
+  warnings: [],
   series: [
     {
       symbol: 'AAPL',
@@ -153,6 +155,7 @@ const product2: NoteProduct = {
   observationDates: ['2025-08-10', '2025-09-10', '2025-10-10', '2025-11-10', '2025-12-10', '2026-01-10', '2026-02-10', '2026-03-10', '2026-04-10', '2026-05-10', '2026-06-10', '2026-07-10'],
   koObservationDates: ['2025-08-10', '2025-09-10', '2025-10-10', '2025-11-10', '2025-12-10', '2026-01-10', '2026-02-10', '2026-03-10', '2026-04-10', '2026-05-10', '2026-06-10', '2026-07-10'],
   koObservationFrequency: null,
+  koType: 'final-valuation',
   summary: 'KIKO อ้างอิง PTT และ CPALL ดอกเบี้ย 9.5% ต่อปี ชน KI ที่ 80% และ KO ที่ 108%',
   raw: 'Raw term sheet data for PTT/CPALL',
   sourceFile: 'term_sheet_ptt_cpall.pdf',
@@ -166,6 +169,7 @@ const backtest2: BacktestResult = {
   volatilityPct: 18.7,
   windowMonths: 12,
   error: null,
+  warnings: [],
   series: [
     {
       symbol: 'PTT',

@@ -139,13 +139,37 @@ def generate_health():
     return {"available": CLAUDE_BIN is not None, "bin": CLAUDE_BIN}
 
 
+# Extracted-text path: a digital PDF's embedded text is 10-50x fewer tokens than
+# having the model view the pages as images, and it removes the Read-tool round trip.
+PDF_TEXT_MIN_CHARS = 200  # below this, assume a scanned/image PDF and fall back to file-attach
+PDF_TEXT_MAX_CHARS = 60_000  # safety cap for pathological documents
+
+
+def _pdf_text(data: bytes) -> str | None:
+    """Extract embedded text from a PDF. Returns None if extraction fails or is too thin."""
+    try:
+        from io import BytesIO
+        from pypdf import PdfReader
+
+        reader = PdfReader(BytesIO(data))
+        pages = [(page.extract_text() or "") for page in reader.pages]
+        text = "\n\n".join(p.strip() for p in pages if p.strip())
+        if len(text) < PDF_TEXT_MIN_CHARS:
+            return None
+        return text[:PDF_TEXT_MAX_CHARS]
+    except Exception:
+        return None
+
+
 @app.post("/api/generate")
 def generate(payload: dict = Body(...)):
     """Runs Claude Code headless (`claude -p`) using the machine's own login — no API key.
 
     The prompt is fed on stdin. Returns the model's plain-text reply.
-    An optional `file` ({name, mediaType, base64}) is written to a temp file so
-    Claude Code can read it with its Read tool (e.g. a PDF term sheet).
+    An optional `file` ({name, mediaType, base64}) is handled two ways:
+    - digital PDF: its text is extracted server-side and inlined into the prompt
+      (fast single-shot, far fewer tokens)
+    - scanned PDF / image: written to a temp file for Claude Code's Read tool
     """
     payload = payload or {}
     prompt = payload.get("prompt", "")
@@ -159,22 +183,33 @@ def generate(payload: dict = Body(...)):
     # credentials rather than any proxy that a parent process may have injected.
     child_env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_BASE_URL"}
 
-    # Allow the read/fetch tools so file (PDF) and web-link inputs work headlessly.
-    args = [CLAUDE_BIN, "-p", "--output-format", "text", "--allowedTools", "Read", "WebFetch"]
+    args = [CLAUDE_BIN, "-p", "--output-format", "text", "--model", "claude-sonnet-5"]
+
+    file_bytes = None
+    if isinstance(file, dict) and file.get("base64"):
+        try:
+            file_bytes = base64.b64decode(file["base64"])
+        except Exception:
+            raise HTTPException(status_code=400, detail="ไฟล์แนบไม่ถูกต้อง (decode ไม่สำเร็จ)")
 
     tmpdir = None
-    if isinstance(file, dict) and file.get("base64"):
-        tmpdir = tempfile.mkdtemp(prefix="kiko_")
-        safe_name = os.path.basename(file.get("name") or "document")
-        fpath = os.path.join(tmpdir, safe_name)
-        try:
+    if file_bytes is not None:
+        text = _pdf_text(file_bytes) if (file.get("mediaType") == "application/pdf") else None
+        if text is not None:
+            # Inline the document text — no tools, no temp file, single-shot reply.
+            prompt = f"{prompt}\n\nเนื้อหาเอกสาร (สกัดข้อความจากไฟล์ {os.path.basename(file.get('name') or 'document')}):\n{text}"
+        else:
+            # Scanned PDF or image — Claude Code must view the file itself.
+            tmpdir = tempfile.mkdtemp(prefix="kiko_")
+            safe_name = os.path.basename(file.get("name") or "document")
+            fpath = os.path.join(tmpdir, safe_name)
             with open(fpath, "wb") as fh:
-                fh.write(base64.b64decode(file["base64"]))
-        except Exception:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-            raise HTTPException(status_code=400, detail="ไฟล์แนบไม่ถูกต้อง (decode ไม่สำเร็จ)")
-        prompt = f"{prompt}\n\nไฟล์เอกสารอยู่ที่พาธนี้ ให้ใช้เครื่องมือ Read อ่านเนื้อหาก่อนตอบ: {fpath}"
-        args += ["--add-dir", tmpdir]
+                fh.write(file_bytes)
+            prompt = f"{prompt}\n\nไฟล์เอกสารอยู่ที่พาธนี้ ให้ใช้เครื่องมือ Read อ่านเนื้อหาก่อนตอบ: {fpath}"
+            args += ["--allowedTools", "Read", "--add-dir", tmpdir]
+    elif "http://" in prompt or "https://" in prompt:
+        # Web-link inputs still need the fetch tool; plain-text prompts get none at all.
+        args += ["--allowedTools", "WebFetch"]
 
     try:
         proc = subprocess.run(

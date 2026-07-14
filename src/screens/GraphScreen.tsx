@@ -159,7 +159,7 @@ export function GraphScreen({ state, patch }: { state: AppState; patch: Patch })
 
         {autoFilled && (
           <div style={{ fontSize: 12.5, color: C.teal, background: C.tealLight, border: `1px solid ${C.tealBorder}`, borderRadius: 8, padding: '8px 12px', marginBottom: 12 }}>
-            🔍 เดาหุ้นอ้างอิงจากเอกสารให้: <b>{guessedSymbol}</b> ({guessedMarket === 'thai' ? 'หุ้นไทย' : 'หุ้นต่างประเทศ'}) — แก้ไขได้ถ้าไม่ถูกต้อง
+            เดาหุ้นอ้างอิงจากเอกสารให้: <b>{guessedSymbol}</b> ({guessedMarket === 'thai' ? 'หุ้นไทย' : 'หุ้นต่างประเทศ'}) — แก้ไขได้ถ้าไม่ถูกต้อง
           </div>
         )}
 
@@ -175,7 +175,7 @@ export function GraphScreen({ state, patch }: { state: AppState; patch: Patch })
             ))}
           </select>
           <NavBtn onClick={handleLoad} disabled={loading}>{loading ? 'กำลังโหลด...' : 'โหลดกราฟ'}</NavBtn>
-          <button onClick={loadMockData} style={{ ...ctrl, cursor: 'pointer' }}>ใช้ mock data</button>
+          <button className="btn-ghost" onClick={loadMockData} style={{ ...ctrl, cursor: 'pointer' }}>ใช้ mock data</button>
         </section>
 
         {error && <p style={{ color: C.coral, fontSize: 13 }}>{error}</p>}
@@ -188,10 +188,10 @@ export function GraphScreen({ state, patch }: { state: AppState; patch: Patch })
             <option value="knock-out">Knock-Out</option>
           </select>
           <input type="number" placeholder="ราคา" value={newLevelPrice} onChange={(e) => setNewLevelPrice(e.target.value)} style={{ ...ctrl, width: 100 }} />
-          <button onClick={addLevel} style={{ ...ctrl, cursor: 'pointer' }}>+ เพิ่มเส้นราคา</button>
+          <button className="btn-ghost" onClick={addLevel} style={{ ...ctrl, cursor: 'pointer' }}>+ เพิ่มเส้นราคา</button>
           <input type="date" value={newMarkDate} onChange={(e) => setNewMarkDate(e.target.value)} style={ctrl} />
           <input type="text" placeholder="ป้ายกำกับวันที่" value={newMarkLabel} onChange={(e) => setNewMarkLabel(e.target.value)} style={{ ...ctrl, width: 150 }} />
-          <button onClick={addDateMark} style={{ ...ctrl, cursor: 'pointer' }}>+ เพิ่มเส้นวันที่</button>
+          <button className="btn-ghost" onClick={addDateMark} style={{ ...ctrl, cursor: 'pointer' }}>+ เพิ่มเส้นวันที่</button>
         </section>
 
         {(levels.length > 0 || dateMarks.length > 0) && (
@@ -199,13 +199,13 @@ export function GraphScreen({ state, patch }: { state: AppState; patch: Patch })
             {levels.map((level) => (
               <li key={level.id} style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: '4px 10px', display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
                 {level.label}
-                <button onClick={() => setLevels((p) => p.filter((l) => l.id !== level.id))} style={{ border: 'none', background: 'none', cursor: 'pointer', color: C.muted }}>×</button>
+                <button className="btn-ghost" aria-label="ลบเส้นราคา" onClick={() => setLevels((p) => p.filter((l) => l.id !== level.id))} style={{ border: 'none', background: 'none', cursor: 'pointer', color: C.muted }}>×</button>
               </li>
             ))}
             {dateMarks.map((mark) => (
               <li key={mark.id} style={{ border: `1px solid ${C.amberBorder}`, background: C.amberLight, borderRadius: 6, padding: '4px 10px', display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: C.amber }}>
                 {mark.label}
-                <button onClick={() => setDateMarks((p) => p.filter((m) => m.id !== mark.id))} style={{ border: 'none', background: 'none', cursor: 'pointer', color: C.amber }}>×</button>
+                <button className="btn-ghost" aria-label="ลบเส้นวันที่" onClick={() => setDateMarks((p) => p.filter((m) => m.id !== mark.id))} style={{ border: 'none', background: 'none', cursor: 'pointer', color: C.amber }}>×</button>
               </li>
             ))}
           </ul>

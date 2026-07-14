@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
 import {
   createChart,
   type IChartApi,
@@ -8,36 +8,68 @@ import {
   ColorType,
   LineStyle,
   CandlestickSeries,
+  LineSeries,
 } from 'lightweight-charts'
 import type { Candle, DateMark, Level } from '../types'
 import { LEVEL_COLORS, LEVEL_LABELS } from '../types'
+import { chartColors, THEME_EVENT } from '../theme'
 
 interface Props {
   candles: Candle[]
   levels: Level[]
   dateMarks: DateMark[]
+  showEma50?: boolean
+  showEma200?: boolean
 }
 
 const CHART_HEIGHT = 600
 const DAY = 86400
+const EMA50_COLOR = '#F2A950'
+const EMA200_COLOR = '#7B6CE0'
 
-// Build the series data + axis times. The axis ends at the last real candle: date marks
-// that fall beyond the fetched price history (e.g. future KO observation dates) are simply
-// not shown, rather than extending the axis into empty future space to fit them.
-function buildData(candles: Candle[]): { data: unknown[]; times: number[] } {
+// Standard EMA: seed with the period's SMA, then smooth forward. Returns null for the
+// warm-up bars (not enough history yet) so the line only starts once it's meaningful.
+function computeEma(candles: Candle[], period: number): { time: number; value: number }[] {
+  if (candles.length < period) return []
+  const k = 2 / (period + 1)
+  const seed = candles.slice(0, period).reduce((sum, c) => sum + c.close, 0) / period
+  const out: { time: number; value: number }[] = [{ time: candles[period - 1].time, value: seed }]
+  let prev = seed
+  for (let i = period; i < candles.length; i++) {
+    const next = candles[i].close * k + prev * (1 - k)
+    out.push({ time: candles[i].time, value: next })
+    prev = next
+  }
+  return out
+}
+
+// Build the series data + axis times. Date marks that fall beyond the fetched price
+// history (future KO observation dates) get whitespace points appended, so the axis
+// extends to fit them and each mark lands on an exact axis time.
+function buildData(candles: Candle[], marks: DateMark[]): { data: unknown[]; times: number[] } {
   const data: unknown[] = candles.map((c) => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }))
   const times: number[] = candles.map((c) => c.time)
+  const last = times[times.length - 1]
+  if (last != null) {
+    const future = [...new Set(marks.map((m) => m.time).filter((t) => t > last))].sort((a, b) => a - b)
+    for (const t of future) {
+      data.push({ time: t }) // whitespace — extends the axis without drawing a bar
+      times.push(t)
+    }
+  }
   return { data, times }
 }
 
-export function CandleChart({ candles, levels, dateMarks }: Props) {
+export function CandleChart({ candles, levels, dateMarks, showEma50 = false, showEma200 = false }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
+  const ema50Ref = useRef<ISeriesApi<'Line'> | null>(null)
+  const ema200Ref = useRef<ISeriesApi<'Line'> | null>(null)
   const priceLinesRef = useRef<IPriceLine[]>([])
   const levelsRef = useRef(levels)
   levelsRef.current = levels
-  const [markPositions, setMarkPositions] = useState<Record<string, number | null>>({})
+  const markElsRef = useRef<Record<string, HTMLDivElement | null>>({})
 
   // The default autoscale only looks at candle OHLC values, so a price line (Strike/KI/KO)
   // far outside the visible candle range would be drawn off-screen. Extend the price range
@@ -64,7 +96,7 @@ export function CandleChart({ candles, levels, dateMarks }: Props) {
       height: CHART_HEIGHT,
       layout: {
         background: { type: ColorType.Solid, color: 'transparent' },
-        textColor: '#6B6A63',
+        textColor: chartColors().text,
       },
       grid: {
         vertLines: { color: 'rgba(128,128,128,0.15)', style: LineStyle.Dashed },
@@ -83,10 +115,17 @@ export function CandleChart({ candles, levels, dateMarks }: Props) {
     const series = chart.addSeries(CandlestickSeries)
     series.applyOptions({ autoscaleInfoProvider: autoscaleWithLevels })
 
+    const ema50 = chart.addSeries(LineSeries, { color: EMA50_COLOR, lineWidth: 2, visible: false, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false })
+    const ema200 = chart.addSeries(LineSeries, { color: EMA200_COLOR, lineWidth: 2, visible: false, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false })
+
     chartRef.current = chart
     seriesRef.current = series
+    ema50Ref.current = ema50
+    ema200Ref.current = ema200
 
-    chart.timeScale().subscribeVisibleTimeRangeChange(() => updateMarkPositions())
+    // Logical-range fires on every pan/zoom frame (including whitespace-only shifts),
+    // so mark lines track the candles with no lag while dragging.
+    chart.timeScale().subscribeVisibleLogicalRangeChange(() => updateMarkPositions())
 
     const resizeObserver = new ResizeObserver(() => {
       chart.applyOptions({ width: container.clientWidth })
@@ -94,8 +133,13 @@ export function CandleChart({ candles, levels, dateMarks }: Props) {
     })
     resizeObserver.observe(container)
 
+    // Canvas colors can't use CSS variables — re-resolve them when the theme flips.
+    const onThemeChange = () => chart.applyOptions({ layout: { textColor: chartColors().text } })
+    window.addEventListener(THEME_EVENT, onThemeChange)
+
     return () => {
       resizeObserver.disconnect()
+      window.removeEventListener(THEME_EVENT, onThemeChange)
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
@@ -120,29 +164,58 @@ export function CandleChart({ candles, levels, dateMarks }: Props) {
     return nearest
   }
 
+  // Position mark lines by writing styles directly to the DOM (no React state):
+  // pan/zoom events fire per frame, and a setState round-trip lags a frame behind
+  // the canvas — the lines would visibly float off the candles while dragging.
   function updateMarkPositions() {
     const chart = chartRef.current
     if (!chart) return
     const timeScale = chart.timeScale()
-    const next: Record<string, number | null> = {}
+    // timeToCoordinate is relative to the pane, which excludes the right price scale —
+    // clip to the pane so lines never overlap the axis strip or bleed past the left edge.
+    const paneWidth = timeScale.width()
     for (const mark of dateMarksRef.current) {
+      const el = markElsRef.current[mark.id]
+      if (!el) continue
       const snapped = nearestAxisTime(mark.time)
-      next[mark.id] = snapped == null ? null : timeScale.timeToCoordinate(snapped as never)
+      const x = snapped == null ? null : timeScale.timeToCoordinate(snapped as never)
+      if (x == null || x < 0 || x > paneWidth) {
+        el.style.display = 'none'
+        continue
+      }
+      el.style.display = ''
+      el.style.left = `${x}px`
+      // Flip the label leftward when the line sits near the pane's right edge so the
+      // text doesn't run over the price scale.
+      const label = el.lastElementChild as HTMLElement | null
+      if (label) label.style.transform = x > paneWidth - 140 ? 'translateX(calc(-100% - 4px))' : 'translateX(4px)'
     }
-    setMarkPositions(next)
   }
 
   // Rebuild data (with future whitespace) whenever candles or marks change.
   useEffect(() => {
     const series = seriesRef.current
     if (!series) return
-    const { data, times } = buildData(candles)
+    const { data, times } = buildData(candles, dateMarks)
     axisTimesRef.current = times
     series.setData(data as never)
     chartRef.current?.timeScale().fitContent()
     updateMarkPositions()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [candles, dateMarks])
+
+  // EMA lines: recompute whenever candles change, and flip visibility on toggle without
+  // recomputing (cheap either way, but keeps the two concerns separate).
+  useEffect(() => {
+    const ema50 = ema50Ref.current
+    const ema200 = ema200Ref.current
+    if (!ema50 || !ema200) return
+    ema50.setData(computeEma(candles, 50) as never)
+    ema200.setData(computeEma(candles, 200) as never)
+    ema50.applyOptions({ visible: showEma50 })
+    ema200.applyOptions({ visible: showEma200 })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [candles, showEma50, showEma200])
 
   useEffect(() => {
     const series = seriesRef.current
@@ -167,33 +240,30 @@ export function CandleChart({ candles, levels, dateMarks }: Props) {
   return (
     <div style={{ position: 'relative' }}>
       <div ref={containerRef} />
-      <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', height: CHART_HEIGHT }}>
-        {dateMarks.map((mark, i) => {
-          const x = markPositions[mark.id]
-          if (x == null) return null
-          // Marks near the right edge (common: freshly-issued notes put the fixing date near
-          // "now") would otherwise run their label text off the chart — flip the anchor so
-          // the label grows leftward from the line instead of spilling past the edge.
-          const containerWidth = containerRef.current?.clientWidth ?? 0
-          const nearRightEdge = containerWidth > 0 && x > containerWidth - 140
-          return (
-            <div key={mark.id} style={{ position: 'absolute', left: x, top: 0, bottom: 0 }}>
-              <div style={{ width: 1, height: '100%', background: '#EDA100', opacity: 0.85 }} />
-              <div
-                style={{
-                  position: 'absolute',
-                  top: 4 + (i % 4) * 16, // stagger so close labels don't overlap
-                  fontSize: 11,
-                  color: '#B07800',
-                  whiteSpace: 'nowrap',
-                  transform: nearRightEdge ? 'translateX(calc(-100% - 4px))' : 'translateX(4px)',
-                }}
-              >
-                {mark.label}
-              </div>
+      {/* overflow:hidden is the hard backstop — even a mid-drag frame can't paint a line
+          or label outside the chart area */}
+      <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', height: CHART_HEIGHT, overflow: 'hidden' }}>
+        {dateMarks.map((mark, i) => (
+          <div
+            key={mark.id}
+            ref={(el) => { markElsRef.current[mark.id] = el }}
+            style={{ position: 'absolute', top: 0, bottom: 0, display: 'none' }}
+          >
+            <div style={{ width: 1, height: '100%', background: 'var(--c-mark)' }} />
+            <div
+              style={{
+                position: 'absolute',
+                top: 4 + (i % 4) * 16, // stagger so close labels don't overlap
+                fontSize: 11,
+                color: 'var(--c-mark-text)',
+                whiteSpace: 'nowrap',
+                transform: 'translateX(4px)',
+              }}
+            >
+              {mark.label}
             </div>
-          )
-        })}
+          </div>
+        ))}
       </div>
     </div>
   )

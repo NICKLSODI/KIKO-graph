@@ -29,6 +29,7 @@ export interface NoteProduct {
   observationDates: string[] // all observation dates (YYYY-MM-DD)
   koObservationDates: string[] // KO observation dates specifically
   koObservationFrequency: 'daily' | 'monthly' | 'quarterly' | null // cadence, used when the doc gives no explicit date list (e.g. "Monthly Observe")
+  koType: 'memory' | 'final-valuation' | null // how KO is assessed: any observation date triggers it (memory/autocall style) vs only the final valuation date
   summary: string
   raw: string // raw model output, for the Details tab / debugging
   sourceFile: string // which uploaded file this came from
@@ -59,6 +60,7 @@ export interface BacktestResult {
   windowMonths: number // the lookback window this result was computed over
   series: UnderlyingSeries[]
   error: string | null // if prices couldn't be fetched
+  warnings: string[] // non-fatal data-quality issues (e.g. missing fixing date, discarded initial prices)
 }
 
 export type ProfileKey = 'aggressive' | 'balanced' | 'save' | 'custom'

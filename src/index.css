@@ -1,16 +1,392 @@
+/* ─────────────────────────────────────────────────────────────
+   Theme system — two tuned palettes exposed as CSS custom
+   properties. All component styles reference these vars (via
+   src/theme.ts), so switching data-theme restyles the app.
+   Type: IBM Plex Sans Thai Looped (UI — looped Thai reads easier
+   at small sizes) + IBM Plex Mono (numerals) for a financial-
+   terminal character. Spacing on a 4/8px grid;
+   radii: 6 (controls), 8 (inputs), 12 (cards).
+   ───────────────────────────────────────────────────────────── */
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai+Looped:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+:root {
+  color-scheme: light;
+
+  /* brand */
+  --c-navy: #0b3d56;
+  --c-teal: #0f6e56;
+  --c-teal-light: #e1f5ee;
+  --c-teal-border: #9fe1cb;
+  --c-coral: #993c1d;
+  --c-coral-light: #faece7;
+  --c-coral-border: #f0997b;
+  --c-amber: #854f0b;
+  --c-amber-light: #faeeda;
+  --c-amber-border: #ef9f27;
+
+  /* neutrals */
+  --c-bg: #f7f6f1;
+  --c-surface: #ffffff;
+  --c-border: #e2e0d5;
+  --c-text: #27261f;
+  --c-muted: #6b6a63;
+
+  /* semantic */
+  --c-danger: #b3261e;
+  --c-focus: #2f7fd0;
+  --c-mark: rgba(237, 161, 0, 0.85);
+  --c-mark-text: #b07800;
+  --c-overlay: rgba(20, 18, 14, 0.55);
+
+  /* depth */
+  --shadow-card: 0 1px 2px rgba(30, 28, 20, 0.05), 0 4px 16px rgba(30, 28, 20, 0.06);
+  --shadow-pop: 0 4px 12px rgba(30, 28, 20, 0.12), 0 12px 40px rgba(30, 28, 20, 0.18);
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  /* brand — re-tuned for dark surfaces, not inverted */
+  --c-navy: #8fc1e3;
+  --c-teal: #4cc39a;
+  --c-teal-light: #14332a;
+  --c-teal-border: #2a5c4b;
+  --c-coral: #ee9068;
+  --c-coral-light: #362019;
+  --c-coral-border: #7a4630;
+  --c-amber: #e9b45c;
+  --c-amber-light: #34290f;
+  --c-amber-border: #7a5c22;
+
+  /* neutrals — warm charcoal to match the cream light theme */
+  --c-bg: #171614;
+  --c-surface: #22211e;
+  --c-border: #3a3833;
+  --c-text: #eceae4;
+  --c-muted: #a5a29a;
+
+  /* semantic */
+  --c-danger: #f2867e;
+  --c-focus: #7db4e8;
+  --c-mark: rgba(233, 180, 92, 0.8);
+  --c-mark-text: #e9b45c;
+  --c-overlay: rgba(0, 0, 0, 0.65);
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 16px rgba(0, 0, 0, 0.35);
+  --shadow-pop: 0 4px 12px rgba(0, 0, 0, 0.5), 0 12px 40px rgba(0, 0, 0, 0.55);
+}
+
 * {
   box-sizing: border-box;
 }
 
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Tahoma, sans-serif;
-  background: #f7f6f1;
-  color: #27261f;
+  font-family: 'IBM Plex Sans Thai Looped', -apple-system, BlinkMacSystemFont, 'Segoe UI', Tahoma, sans-serif;
+  /* Looped Thai glyphs are busier — extra leading keeps vowel/tone marks clear */
+  line-height: 1.65;
+  background: var(--c-bg);
+  color: var(--c-text);
+  transition: background-color 0.2s ease, color 0.2s ease;
+  -webkit-font-smoothing: antialiased;
 }
 
-input, select, button {
+/* Numerals / codes — tabular mono gives tables a terminal read */
+.num {
+  font-family: 'IBM Plex Mono', ui-monospace, 'Cascadia Mono', monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.96em;
+}
+
+/* Overline label — small caps section markers replace emoji headers */
+.overline {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--c-muted);
+}
+
+input,
+select,
+button,
+textarea {
   font: inherit;
+}
+
+input,
+select,
+textarea {
+  background: var(--c-surface);
+  color: var(--c-text);
+  transition: background-color 0.2s ease, border-color 0.15s ease, color 0.2s ease, box-shadow 0.15s ease;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--c-muted);
+  opacity: 0.75;
+}
+
+input:hover:not(:disabled),
+select:hover:not(:disabled),
+textarea:hover:not(:disabled) {
+  border-color: var(--c-muted) !important;
+}
+
+/* Accessible, consistent focus ring everywhere (keyboard nav) */
+:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+button {
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease,
+    box-shadow 0.15s ease, transform 0.1s ease, opacity 0.15s ease, filter 0.15s ease;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+/* Generic interactive buttons (chips, pills, small table actions) —
+   opt-in hover/active feedback without restyling each call site */
+.btn-ghost:hover:not(:disabled) {
+  border-color: var(--c-muted) !important;
+  filter: brightness(0.985);
+}
+[data-theme='dark'] .btn-ghost:hover:not(:disabled) {
+  filter: brightness(1.15);
+}
+.btn-ghost:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+/* Primary / secondary nav buttons */
+.btn-primary:hover:not(:disabled) {
+  filter: brightness(1.1);
+  box-shadow: 0 2px 8px rgba(15, 110, 86, 0.35);
+}
+.btn-primary:active:not(:disabled) {
+  transform: translateY(1px);
+  filter: brightness(0.97);
+}
+.btn-primary:disabled {
+  opacity: 0.55;
+}
+.btn-secondary:hover:not(:disabled) {
+  border-color: var(--c-muted) !important;
+  color: var(--c-text) !important;
+}
+.btn-secondary:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.btn-secondary:disabled {
+  opacity: 0.55;
+}
+
+/* Card — flatter and sharper than the default AI-rounded look */
+.card {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 12px;
+  padding: 28px;
+  box-shadow: var(--shadow-card);
+  transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+/* App header — brand bar replaces the floating toggle */
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  max-width: 1100px;
+  margin: 0 auto 24px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--c-border);
+}
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.brand-mark {
+  font-family: 'IBM Plex Mono', monospace;
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+  color: var(--c-text);
+}
+.brand-mark::before {
+  content: '▚ ';
+  color: var(--c-teal);
+}
+.brand-sub {
+  font-size: 11.5px;
+  color: var(--c-muted);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.theme-toggle {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.theme-toggle:hover {
+  border-color: var(--c-muted);
+}
+.theme-toggle:active {
+  transform: scale(0.96);
+}
+
+/* Stat tiles — dashboard summary strip */
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1px;
+  background: var(--c-border);
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  overflow: hidden;
+  margin: 16px 0 20px;
+}
+.tile {
+  background: var(--c-surface);
+  padding: 14px 16px;
+}
+.tile .k {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--c-muted);
+  margin-bottom: 6px;
+}
+.tile .v {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--c-text);
+}
+.tile .s {
+  font-size: 12px;
+  color: var(--c-muted);
+  margin-top: 4px;
+}
+
+/* Section header — overline + rule, groups the detail page */
+.section-h {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 26px 0 10px;
+}
+.section-h::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--c-border);
+}
+
+/* Fact grid — key/value pairs in the detail panel */
+.fact-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 0 32px;
+}
+.fact-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--c-border);
+  font-size: 14.5px;
+  line-height: 1.6;
+}
+.fact-item .fk {
+  color: var(--c-muted);
+  flex-shrink: 0;
+}
+.fact-item .fv {
+  font-weight: 600;
+  text-align: right;
+}
+
+/* Status badges */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid;
+}
+.badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.badge.pass {
+  color: var(--c-teal);
+  background: var(--c-teal-light);
+  border-color: var(--c-teal-border);
+}
+.badge.knock {
+  color: var(--c-coral);
+  background: var(--c-coral-light);
+  border-color: var(--c-coral-border);
+}
+.badge.plain {
+  color: var(--c-muted);
+  background: var(--c-surface);
+  border-color: var(--c-border);
+}
+
+/* Rank chip — replaces medal emoji in ranking tables */
+.rank-chip {
+  font-family: 'IBM Plex Mono', monospace;
+  font-weight: 600;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 22px;
+  padding: 0 5px;
+  border-radius: 6px;
+  border: 1px solid var(--c-border);
+  color: var(--c-muted);
+  background: var(--c-surface);
+}
+.rank-chip.top {
+  border-color: var(--c-teal);
+  color: var(--c-teal);
+  background: var(--c-teal-light);
+}
+
+/* Table rows */
+.row-hover:hover td {
+  background: color-mix(in srgb, var(--c-teal-light) 45%, transparent);
 }
 
 .spin {
@@ -18,5 +394,16 @@ input, select, button {
   animation: spin 1.4s linear infinite;
 }
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
 }

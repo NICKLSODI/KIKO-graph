@@ -29,14 +29,14 @@ export function FileDrop({
   if (file) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 14px', background: C.tealLight, border: `1px solid ${C.tealBorder}`, borderRadius: 10 }}>
-        <span style={{ color: C.teal, fontSize: 14 }}>📄 {file.name}</span>
+        <span style={{ color: C.teal, fontSize: 14 }}>{file.name}</span>
         <button onClick={onClear} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.muted, fontSize: 18, lineHeight: 1 }}>×</button>
       </div>
     )
   }
   return (
     <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '20px', border: `1.5px dashed ${C.border}`, borderRadius: 10, cursor: 'pointer', color: C.muted, fontSize: 14 }}>
-      📁 นำเข้าไฟล์เอกสาร (รูปแบบ PDF, PNG, JPG, WEBP — ขนาดไม่เกิน 20MB)
+      นำเข้าไฟล์เอกสาร — PDF, PNG, JPG, WEBP ไม่เกิน 20MB
       <input
         type="file"
         accept=".pdf,.png,.jpg,.jpeg,.webp"
@@ -102,7 +102,7 @@ export function FactsheetInput({
             style={{ width: '100%', padding: '12px 14px', borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 14, boxSizing: 'border-box', marginBottom: 6 }}
           />
           {link.trim().length > 0 && !/^https?:\/\/.+/i.test(link.trim()) && (
-            <div style={{ fontSize: 12, color: '#B3261E', marginBottom: 8 }}>กรุณาระบุลิงก์ในรูปแบบที่ถูกต้อง ต้องเริ่มต้นด้วย http:// หรือ https://</div>
+            <div style={{ fontSize: 12, color: C.danger, marginBottom: 8 }}>กรุณาระบุลิงก์ในรูปแบบที่ถูกต้อง ต้องเริ่มต้นด้วย http:// หรือ https://</div>
           )}
         </div>
       )}

@@ -25,13 +25,19 @@ function initialCandle(candles: Candle[], fixingDate: string | null): Candle | n
   return candles.find((c) => c.time >= fx) ?? candles[0]
 }
 
-// Close price on the trading day nearest to a target time.
+const DAY = 86400
+// A target date more than this far from any real candle has no meaningful close —
+// treat it as "no data" instead of silently judging against a far-away price.
+const NEAR_LIMIT = DAY * 4
+
+// Close price on the trading day nearest to a target time (within NEAR_LIMIT).
 function closeNear(candles: Candle[], target: number): number | null {
   let best: Candle | null = null
   for (const c of candles) {
     if (!best || Math.abs(c.time - target) < Math.abs(best.time - target)) best = c
   }
-  return best?.close ?? null
+  if (!best || Math.abs(best.time - target) > NEAR_LIMIT) return null
+  return best.close
 }
 
 // Annualised volatility (%) from daily log returns over the window.
@@ -133,7 +139,14 @@ function checkKnockOutContinuous(series: UnderlyingSeries[], checkFromTime: numb
 }
 
 export async function backtest(product: NoteProduct, windowMonths = 12): Promise<BacktestResult> {
-  const base = { windowMonths, series: [] as UnderlyingSeries[] }
+  const warnings: string[] = []
+  if (product.initialPrices.length > 0 && product.initialPrices.length !== product.underlyings.length) {
+    warnings.push(`ราคาเริ่มต้นในเอกสาร (${product.initialPrices.length} ค่า) ไม่ตรงกับจำนวนหุ้นอ้างอิง (${product.underlyings.length} ตัว) — ระบบไม่ใช้ค่าดังกล่าว และใช้ราคาปิด ณ วัน fixing แทน`)
+  }
+  if (!product.fixingDate && product.initialPrices.length === 0) {
+    warnings.push('เอกสารไม่ระบุวัน fixing และราคาเริ่มต้น — ระดับ Strike/KI/KO คำนวณจากแท่งแรกของข้อมูลที่ดึงได้ อาจคลาดเคลื่อน')
+  }
+  const base = { windowMonths, series: [] as UnderlyingSeries[], warnings }
   if (product.underlyings.length === 0) {
     return { ...base, verdict: 'pass', knockedIn: false, knockedOut: false, bufferPct: null, volatilityPct: null, error: 'ไม่พบหุ้นอ้างอิงในเอกสาร' }
   }
@@ -148,9 +161,13 @@ export async function backtest(product: NoteProduct, windowMonths = 12): Promise
       perSymbolCandles.set(sym, candles)
       lastTime = Math.max(lastTime, candles[candles.length - 1].time)
     }
+    // Stated initial prices pair with underlyings BY INDEX — a count mismatch means the
+    // pairing is unreliable (silently wrong Strike/KI/KO levels), so discard them entirely
+    // and fall back to the fixing-date close instead.
+    const statedOk = product.initialPrices.length === product.underlyings.length
     const checkFromTime = windowStart(lastTime, windowMonths)
     product.underlyings.forEach((sym, i) => {
-      series.push(buildSeries(product, sym, perSymbolCandles.get(sym)!, checkFromTime, product.initialPrices[i] ?? null))
+      series.push(buildSeries(product, sym, perSymbolCandles.get(sym)!, checkFromTime, statedOk ? product.initialPrices[i] : null))
     })
   } catch (err) {
     return { ...base, series, verdict: 'pass', knockedIn: false, knockedOut: false, bufferPct: null, volatilityPct: null, error: err instanceof Error ? err.message : String(err) }

@@ -1,21 +1,51 @@
-import type { ReactNode } from 'react'
-import { C, FONT } from '../theme'
+import { useEffect, useState, type ReactNode } from 'react'
+import { C, FONT, currentTheme, toggleTheme, THEME_EVENT, type Theme } from '../theme'
+
+/* ─── Theme toggle ─── */
+export function ThemeToggle() {
+  const [theme, setThemeState] = useState<Theme>(() => currentTheme())
+  useEffect(() => {
+    const onChange = () => setThemeState(currentTheme())
+    window.addEventListener(THEME_EVENT, onChange)
+    return () => window.removeEventListener(THEME_EVENT, onChange)
+  }, [])
+  const dark = theme === 'dark'
+  return (
+    <button
+      className="theme-toggle"
+      onClick={toggleTheme}
+      aria-label={dark ? 'สลับเป็นโหมดสว่าง' : 'สลับเป็นโหมดมืด'}
+      title={dark ? 'โหมดสว่าง' : 'โหมดมืด'}
+    >
+      {dark ? '☀️' : '🌙'}
+    </button>
+  )
+}
 
 /* ─── Layout ─── */
+export function AppHeader() {
+  return (
+    <header className="app-header">
+      <div className="brand" onClick={() => location.reload()}>
+        <span className="brand-mark">KIKO·Copilot</span>
+        <span className="brand-sub">Structured Note Advisor</span>
+      </div>
+      <ThemeToggle />
+    </header>
+  )
+}
+
 export function Screen({ children, maxWidth = 600 }: { children: ReactNode; maxWidth?: number }) {
   return (
-    <div style={{ minHeight: '100vh', background: C.bg, fontFamily: FONT, padding: '32px 16px' }}>
+    <div style={{ minHeight: '100vh', background: C.bg, fontFamily: FONT, padding: '24px 16px 40px' }}>
+      <AppHeader />
       <div style={{ maxWidth, margin: '0 auto' }}>{children}</div>
     </div>
   )
 }
 
 export function Card({ children }: { children: ReactNode }) {
-  return (
-    <div style={{ background: C.white, borderRadius: 16, border: `1px solid ${C.border}`, padding: 28 }}>
-      {children}
-    </div>
-  )
+  return <div className="card">{children}</div>
 }
 
 export function Field({ label, children }: { label: string; children: ReactNode }) {
@@ -79,6 +109,8 @@ export function PillGroup({
         return (
           <button
             key={val}
+            className="btn-ghost"
+            aria-pressed={sel}
             onClick={() => toggle(val)}
             style={{
               padding: '8px 13px', borderRadius: 20, fontSize: 13.5, cursor: 'pointer',
@@ -125,13 +157,14 @@ export function NavBtn({
 }) {
   return (
     <button
+      className={secondary ? 'btn-secondary' : 'btn-primary'}
       onClick={onClick}
       disabled={disabled}
       style={{
         display: 'flex', alignItems: 'center', gap: 6, padding: '10px 18px', borderRadius: 8,
-        border: secondary ? `1px solid ${C.border}` : 'none',
-        background: secondary ? C.white : disabled ? C.border : C.teal,
-        color: secondary ? C.muted : disabled ? C.muted : C.white,
+        border: secondary ? `1px solid ${C.border}` : '1px solid transparent',
+        background: secondary ? C.white : C.teal,
+        color: secondary ? C.muted : C.white,
         fontSize: 14, fontWeight: secondary ? 400 : 600, cursor: disabled ? 'default' : 'pointer',
       }}
     >

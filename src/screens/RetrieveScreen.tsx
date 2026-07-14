@@ -24,7 +24,7 @@ function nextScreenFor(state: AppState): AppState['screen'] {
 function DataPreview({ data }: { data: RetrievedProductData }) {
   return (
     <div style={{ border: `1px solid ${C.tealBorder}`, background: C.tealLight, borderRadius: 10, padding: 14, marginTop: 12 }}>
-      <div style={{ fontSize: 13.5, fontWeight: 600, color: C.teal, marginBottom: 8 }}>✓ ดึงข้อมูลสำเร็จ</div>
+      <div style={{ fontSize: 13.5, fontWeight: 600, color: C.teal, marginBottom: 8 }}>ดึงข้อมูลสำเร็จ</div>
       <div style={{ fontSize: 13, color: C.text, lineHeight: 1.7 }}>
         <div><b>สรุป:</b> {data.summary || '-'}</div>
         <div><b>ชื่อผลิตภัณฑ์:</b> {data.productName ?? '-'} &nbsp;|&nbsp; <b>ประเภท:</b> {data.productType ?? '-'}</div>

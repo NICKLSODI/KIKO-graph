@@ -25,6 +25,7 @@ export const NOTE_EXTRACTION_INSTRUCTIONS = `คุณเป็นผู้เ�
   "observationDates": string[],        // วันสังเกตการณ์ทั้งหมด รูปแบบ YYYY-MM-DD
   "koObservationDates": string[],      // วันสังเกตการณ์ KO โดยเฉพาะ (ถ้าระบุแยก) รูปแบบ YYYY-MM-DD
   "koObservationFrequency": "daily" | "monthly" | "quarterly" | null, // ถ้าเอกสารบอกแค่ความถี่ (เช่น "Monthly Observe", "Daily Observe") แทนที่จะมี list วันที่ชัดเจน ให้ใส่ความถี่ตรงนี้แทน — ถ้ามี koObservationDates ชัดเจนอยู่แล้วใส่ null ก็ได้
+  "koType": "memory" | "final-valuation" | null, // รูปแบบการตัดสิน KO: "memory" = ชนระดับ KO ในวันสังเกตการณ์ใดก็ถือว่า KO ทันที (autocall/memory), "final-valuation" = ตัดสินเฉพาะวันประเมินราคาสุดท้าย (Final Valuation Date) เท่านั้น — ถ้าเอกสารไม่ระบุชัดให้ null
   "summary": string                    // สรุปผลิตภัณฑ์ 2-4 บรรทัด ภาษาไทย
 }
 
@@ -57,6 +58,13 @@ function structureOf(v: unknown): StructureType {
 function frequencyOf(v: unknown): 'daily' | 'monthly' | 'quarterly' | null {
   const s = str(v)?.toLowerCase()
   return s === 'daily' || s === 'monthly' || s === 'quarterly' ? s : null
+}
+function koTypeOf(v: unknown): 'memory' | 'final-valuation' | null {
+  const s = str(v)?.toLowerCase()
+  if (s === 'memory') return 'memory'
+  // tolerate "final valuation" / "final_valuation" spelling drift from the model
+  if (s && s.startsWith('final')) return 'final-valuation'
+  return null
 }
 
 // Parse "6M", "1Y", "12 เดือน", "1 ปี" → months.
@@ -100,6 +108,7 @@ export function parseNoteProduct(raw: string, sourceFile: string, id: string): N
     observationDates: strArr(p.observationDates),
     koObservationDates: strArr(p.koObservationDates),
     koObservationFrequency: frequencyOf(p.koObservationFrequency),
+    koType: koTypeOf(p.koType),
     summary: str(p.summary) ?? '',
     raw,
     sourceFile,
@@ -111,8 +120,52 @@ export type NoteSource =
   | { kind: 'link'; link: string; label: string }
   | { kind: 'text'; text: string; label: string }
 
-/** Extract one product per source (file, web link, or pasted text) via local Claude Code. */
+// Cache raw model replies by content hash: re-uploading the same document (retrying a
+// batch, adding one more file) re-extracts for free instead of paying tokens again.
+// The instructions are part of the hash, so editing the schema invalidates old entries.
+const EXTRACT_CACHE_PREFIX = 'kiko-extract:'
+
+async function contentHash(source: NoteSource): Promise<string> {
+  const content =
+    source.kind === 'file' ? `file|${source.file.base64}` : source.kind === 'link' ? `link|${source.link}` : `text|${source.text}`
+  const data = new TextEncoder().encode(`${NOTE_EXTRACTION_INSTRUCTIONS}\n${content}`)
+  const digest = await crypto.subtle.digest('SHA-256', data)
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+function cacheGet(key: string): string | null {
+  try {
+    return localStorage.getItem(EXTRACT_CACHE_PREFIX + key)
+  } catch {
+    return null
+  }
+}
+
+function cacheSet(key: string, value: string): void {
+  try {
+    localStorage.setItem(EXTRACT_CACHE_PREFIX + key, value)
+  } catch {
+    // quota full — evict all extract entries and retry once
+    try {
+      Object.keys(localStorage)
+        .filter((k) => k.startsWith(EXTRACT_CACHE_PREFIX))
+        .forEach((k) => localStorage.removeItem(k))
+      localStorage.setItem(EXTRACT_CACHE_PREFIX + key, value)
+    } catch { /* give up silently */ }
+  }
+}
+
+/** Extract one product per source (file, web link, or pasted text) via local Claude Code.
+ *  Identical sources hit a localStorage cache and skip the model call entirely. */
 export async function extractNote(source: NoteSource, id: string): Promise<NoteProduct> {
+  const key = await contentHash(source)
+  const cached = cacheGet(key)
+  if (cached) {
+    try {
+      return parseNoteProduct(cached, source.label, id)
+    } catch { /* stale/corrupt entry — fall through to a fresh extraction */ }
+  }
+
   let text: string
   if (source.kind === 'file') {
     const prompt = `${NOTE_EXTRACTION_INSTRUCTIONS}\n\nเอกสาร Term Sheet แนบเป็นไฟล์ (${source.file.name})`
@@ -124,5 +177,7 @@ export async function extractNote(source: NoteSource, id: string): Promise<NoteP
     const prompt = `${NOTE_EXTRACTION_INSTRUCTIONS}\n\nเอกสาร Term Sheet (ข้อความที่ผู้ใช้ป้อน):\n${source.text}`
     text = await generate(prompt)
   }
-  return parseNoteProduct(text, source.label, id)
+  const product = parseNoteProduct(text, source.label, id) // validate BEFORE caching — never cache junk
+  cacheSet(key, text)
+  return product
 }
