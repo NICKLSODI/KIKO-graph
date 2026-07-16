@@ -2,4 +2,13 @@ node_modules
 dist
 .DS_Store
 backend/.env
+backend/.venv
 backend/__pycache__
+
+# build artifacts / caches (regenerated automatically)
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+backend/.nlm_notebook_id
+
+.claude/settings.local.json
