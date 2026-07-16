@@ -38,6 +38,10 @@ export interface AppState {
   // Notional entered on the detail page — carried to the factsheet so it can show
   // min subscription + net-interest-after-tax (null = not entered, those tiles hidden).
   notional: number | null
+  // Latest market closes per underlying (from the backtest price data) + their date —
+  // lets the factsheet render the Spot / money-levels / shares basket like the reference.
+  spots: Record<string, number> | null
+  spotAsOf: string | null
 
   // Persona (script branch)
   relationshipStatus: string
@@ -70,6 +74,8 @@ const INITIAL: AppState = {
   retrieved: null,
   selectedProduct: null,
   notional: null,
+  spots: null,
+  spotAsOf: null,
   relationshipStatus: '',
   ageRange: '',
   financialKnowledge: '',

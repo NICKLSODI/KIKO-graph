@@ -30,8 +30,8 @@ export function FactsheetScreen({ state, patch }: { state: AppState; patch: Patc
   }, [product])
 
   const render = useMemo(
-    () => (product ? renderFactsheet(product, lang, override || undefined, state.notional) : null),
-    [product, lang, override, state.notional],
+    () => (product ? renderFactsheet(product, lang, override || undefined, state.notional, state.spots, state.spotAsOf) : null),
+    [product, lang, override, state.notional, state.spots, state.spotAsOf],
   )
 
   function openPrint() {

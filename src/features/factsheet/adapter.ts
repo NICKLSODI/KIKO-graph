@@ -75,7 +75,14 @@ export { MAPPED_PRODUCT_KEYS }
  *  (variant_fields → deal → dealToFactsheetData → buildFactsheetKH); falls back to the
  *  illustrative REGISTRY template when the product type has no verified mapper yet or
  *  the extraction carried no variant_fields (per memie's compliance rules: never guess). */
-export function renderFactsheet(product: NoteProduct, lang: 'en' | 'th', overrideKey?: string, notional?: number | null): FactsheetRender {
+export function renderFactsheet(
+  product: NoteProduct,
+  lang: 'en' | 'th',
+  overrideKey?: string,
+  notional?: number | null,
+  spots?: Record<string, number> | null,
+  spotAsOf?: string | null,
+): FactsheetRender {
   const vf = backfillFromProduct(product.variantFields, product)
   const deal = variantFieldsToDeal(vf)
   // Notional (optional) lets the mapper add min-subscription + net-interest-after-tax like
@@ -83,6 +90,13 @@ export function renderFactsheet(product: NoteProduct, lang: 'en' | 'th', overrid
   if (notional != null && notional > 0) {
     deal.notional = notional
     deal.currency = product.market === 'thai' ? 'THB' : 'USD'
+  }
+  // Latest market closes (from the backtest's price data) — turns the %-only basket into
+  // the reference layout with Spot, money levels, and shares-for-delivery.
+  if (spots && Object.keys(spots).length) {
+    deal.spots = spots
+    deal.currency = deal.currency ?? (product.market === 'thai' ? 'THB' : 'USD')
+    if (spotAsOf) deal.spotAsOf = spotAsOf
   }
   const autoKey = detectVariant(deal.variantFields) ?? 'kiko'
   const key = overrideKey || autoKey

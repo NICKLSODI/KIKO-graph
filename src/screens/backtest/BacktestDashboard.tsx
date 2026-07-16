@@ -14,7 +14,6 @@ import type { BacktestResult, DetailProduct, NoteProduct, ProfileKey, ScoredProd
 import { STRUCTURE_TYPE_LABELS } from '../../features/backtest/types'
 import type { RetrievedProductData } from '../../features/ingest/ingest'
 import type { Patch } from '../../store'
-import { MOCK_BACKTEST_BUNDLE } from '../../dev/mockData'
 
 type Phase = 'upload' | 'running' | 'dashboard'
 type SortKey = 'rank' | 'coupon' | 'buffer' | 'vol' | 'tenor'
@@ -239,12 +238,27 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   }
 
   async function run() {
+    // Drafts still sitting in the text/link inputs count automatically — pasting a
+    // summary and hitting เริ่มวิเคราะห์ works without the "+ เพิ่มข้อความ" step.
+    const pending: NoteSource[] = []
+    const text = textDraft.trim()
+    if (text) pending.push({ kind: 'text', text, label: `ข้อความ #${sources.filter((s) => s.kind === 'text').length + 1}` })
+    const link = linkDraft.trim()
+    if (link) pending.push({ kind: 'link', link, label: link })
+    const all = [...sources, ...pending]
+    if (all.length === 0) return
+    if (pending.length) {
+      setSources(all)
+      setTextDraft('')
+      setLinkDraft('')
+    }
+
     setPhase('running')
     setErrors([])
     const errs: string[] = []
     // One source can yield MANY products (a pasted desk listing → N products), so each
     // slot holds an array that gets flattened afterwards.
-    const results: NoteProduct[][] = new Array(sources.length).fill(null).map(() => [])
+    const results: NoteProduct[][] = new Array(all.length).fill(null).map(() => [])
     const nextFileById: Record<string, GenerateFile> = {}
 
     // Extract concurrently (small pool) — wall-clock is dominated by the model call,
@@ -252,11 +266,11 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     const CONCURRENCY = 3
     let started = 0
     let done = 0
-    setProgress(`สกัดข้อมูล 0/${sources.length}`)
+    setProgress(`สกัดข้อมูล 0/${all.length}`)
     async function worker() {
-      while (started < sources.length) {
+      while (started < all.length) {
         const i = started++
-        const source = sources[i]
+        const source = all[i]
         try {
           if (source.kind === 'text') {
             // Large desk listings are split into small chunks + extracted concurrently so a
@@ -271,10 +285,10 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
           errs.push(err instanceof Error ? err.message : String(err))
         }
         done++
-        setProgress(`สกัดข้อมูล ${done}/${sources.length}`)
+        setProgress(`สกัดข้อมูล ${done}/${all.length}`)
       }
     }
-    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, sources.length) }, worker))
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, all.length) }, worker))
 
     const prods = results.flat()
     setProducts(prods)
@@ -311,16 +325,6 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     setLinkDraft('')
   }
 
-  function addTextSource() {
-    const text = textDraft.trim()
-    if (!text) return
-    // One text source may hold many products — the model splits it at extraction time
-    // (extractNotesFromText), deciding the product count and underlyings itself.
-    const n = sources.filter((s) => s.kind === 'text').length + 1
-    setSources((prev) => [...prev, { kind: 'text', text, label: `ข้อความ #${n}` }])
-    setTextDraft('')
-  }
-
   function removeSource(i: number) {
     setSources((prev) => prev.filter((_, idx) => idx !== i))
   }
@@ -348,21 +352,6 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
       setPrinting(false)
     }
   }
-
-  function loadMockData() {
-    setErrors([])
-    setProgress('mock data loaded')
-    // Mock results include full candle series, so chartReady = true — no lazy pass needed.
-    const loaded = MOCK_BACKTEST_BUNDLE.map((preset: { backtestProduct: NoteProduct; backtestResult: BacktestResult }) => ({
-      product: preset.backtestProduct,
-      backtest: { ...preset.backtestResult, chartReady: true },
-    }))
-    setProducts(loaded.map((item: Item) => item.product))
-    setItems(loaded)
-    setSelectedId(loaded[0]?.product.id ?? null)
-    setPhase('dashboard')
-  }
-
 
   function changeWindow(wm: number) {
     setWindowMonths(wm)
@@ -475,7 +464,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
                       rows={5}
                       style={{ width: '100%', padding: '12px 14px', borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 14, boxSizing: 'border-box', resize: 'vertical', fontFamily: 'inherit', marginBottom: 8 }}
                     />
-                    <NavBtn onClick={addTextSource} disabled={!textDraft.trim()} secondary>+ เพิ่มข้อความ</NavBtn>
+                    <span style={{ fontSize: 12, color: C.muted }}>วางข้อความแล้วกด "เริ่มวิเคราะห์" ได้เลย</span>
                   </div>
                 )}
               </div>
@@ -495,17 +484,13 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
                 </ul>
               )}
 
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginTop: 20 }}>
-                <button
-                  className="btn-ghost"
-                  onClick={loadMockData}
-                  title="โหลดชุดตัวอย่างเพื่อดูหน้าตา dashboard — ไม่เรียกสกัดข้อมูลจริง"
-                  style={{ padding: '8px 14px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.muted, fontSize: 12.5, cursor: 'pointer' }}
-                >
-                  ลองด้วยข้อมูลตัวอย่าง (demo)
-                </button>
-                <NavBtn onClick={run} disabled={sources.length === 0}>
-                  {sources.length ? `เริ่มวิเคราะห์ ${sources.length} รายการ →` : 'เพิ่มข้อมูลก่อน'}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 12, marginTop: 20 }}>
+                <NavBtn onClick={run} disabled={sources.length + (textDraft.trim() ? 1 : 0) + (linkDraft.trim() ? 1 : 0) === 0}>
+                  {(() => {
+                    // Pending drafts count toward the total so the button reflects what run() will do.
+                    const n = sources.length + (textDraft.trim() ? 1 : 0) + (linkDraft.trim() ? 1 : 0)
+                    return n ? `เริ่มวิเคราะห์ ${n} รายการ →` : 'เพิ่มข้อมูลก่อน'
+                  })()}
                 </NavBtn>
               </div>
             </>
@@ -640,7 +625,22 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
                 onClick={() => {
                   if (!selected) return
                   const n = Number(notional.replace(/,/g, ''))
-                  patch({ selectedProduct: selected.product, notional: notional.trim() && Number.isFinite(n) && n > 0 ? n : null, screen: 'factsheet' })
+                  // Latest closes per underlying (already fetched for the backtest) — the
+                  // factsheet uses them as Spot to compute money levels + shares for delivery.
+                  const spots: Record<string, number> = {}
+                  let lastTime = 0
+                  for (const ser of selected.backtest.series) {
+                    if (ser.currentPrice != null) spots[ser.symbol] = ser.currentPrice
+                    const t = ser.candles[ser.candles.length - 1]?.time
+                    if (t && t > lastTime) lastTime = t
+                  }
+                  patch({
+                    selectedProduct: selected.product,
+                    notional: notional.trim() && Number.isFinite(n) && n > 0 ? n : null,
+                    spots: Object.keys(spots).length ? spots : null,
+                    spotAsOf: lastTime ? new Date(lastTime * 1000).toISOString().slice(0, 10) : null,
+                    screen: 'factsheet',
+                  })
                 }}
                 style={{ padding: '9px 14px', borderRadius: 8, border: `1px solid ${C.primaryBorder}`, background: C.primaryLight, color: C.primary, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}
               >

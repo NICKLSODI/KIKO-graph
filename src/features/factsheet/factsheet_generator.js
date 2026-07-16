@@ -253,9 +253,11 @@ function _basketKH2(bk,lang){
     else if(/knock-in/.test(c)) role.ki=si;
     else if(/shares/.test(c)) role.shares=si; }
   const pct=(thb,spot)=>{const t=_num(thb),s=_num(spot); return (t!=null&&s)?(t/s*100).toFixed(2)+'%':'';};
+  // Currency label from the basket data (real deals may be USD) — defaults to THB.
+  const curEn=bk.cur||'THB', curTh=curEn==='THB'?'บาท':curEn;
   const heads=lang==='en'
-    ? ['Stock','Spot (THB)','Strike (%)','Strike (THB)','KO (%)','KO (THB)','KI (%)','KI (THB)','Shares for Delivery']
-    : ['หลักทรัพย์','Spot (บาท)','Strike (%)','Strike (บาท)','KO (%)','KO (บาท)','KI (%)','KI (บาท)','จำนวนหุ้นส่งมอบ'];
+    ? ['Stock',`Spot (${curEn})`,'Strike (%)',`Strike (${curEn})`,'KO (%)',`KO (${curEn})`,'KI (%)',`KI (${curEn})`,'Shares for Delivery']
+    : ['หลักทรัพย์',`Spot (${curTh})`,'Strike (%)',`Strike (${curTh})`,'KO (%)',`KO (${curTh})`,'KI (%)',`KI (${curTh})`,'จำนวนหุ้นส่งมอบ'];
   const nCols=heads.length;
   let h=`<table class="bk2"><thead><tr>`+heads.map(c=>`<th>${c}</th>`).join('')+`</tr></thead><tbody>`;
   for(const g of bk.groups){
@@ -469,6 +471,8 @@ export function buildFactsheetKH(pk, lang, opts={}){
         `<b>วิธีคิดผลตอบแทน:</b> ถ้าราคา${dir} KO Level (${ko}) → รับ Participation สูงสุด <b>${cap}</b> · ถ้าเคยแตะ ${ko} (Knock-Out) → รับ <b>KO Rebate ${reb}</b> แทน · ถ้าราคา${dirNo} → คืนเงินต้นเต็ม 100%`);
       s.push(`<div class="calc-line">${note}</div>`);
     }
+    // Basket provenance note (e.g. spot = latest close, levels calculated) — shown first.
+    if(p._basketNote) s.push(`<div class="calc-line">${p._basketNote[lang]}</div>`);
     // Data-object payoff note (e.g. real KIKO deals) — bilingual {en,th} carried on the data.
     if(p._payoffNote) s.push(`<div class="calc-line">${p._payoffNote[lang]}</div>`);
   };

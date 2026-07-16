@@ -60,6 +60,7 @@ async function renderSeriesCanvas(
   marks: DateMark[],
   width = CHART_W,
   height = CHART_H,
+  fontSize = 12,
 ): Promise<HTMLCanvasElement> {
   const container = document.createElement('div')
   container.style.position = 'fixed'
@@ -72,7 +73,7 @@ async function renderSeriesCanvas(
   const chart = createChart(container, {
     width,
     height,
-    layout: { background: { type: ColorType.Solid, color: '#ffffff' }, textColor: '#27261F' },
+    layout: { background: { type: ColorType.Solid, color: '#ffffff' }, textColor: '#27261F', fontSize },
     grid: {
       vertLines: { color: 'rgba(128,128,128,0.15)', style: LineStyle.Dashed },
       horzLines: { color: 'rgba(128,128,128,0.15)', style: LineStyle.Dashed },
@@ -80,7 +81,11 @@ async function renderSeriesCanvas(
     rightPriceScale: { scaleMargins: { top: 0.08, bottom: 0.08 } },
     timeScale: { rightOffset: 8 },
   })
-  const series = chart.addSeries(CandlestickSeries)
+  const series = chart.addSeries(CandlestickSeries, {
+    // Client-facing export — hide the last-price axis badge/line (the live app keeps them).
+    lastValueVisible: false,
+    priceLineVisible: false,
+  })
   // Same whitespace-extension as the live chart — without it, marks past the last real
   // candle (future KO observation dates) have no axis point to snap to and never draw.
   const { data, times } = buildData(candles, marks)
@@ -123,7 +128,7 @@ async function renderSeriesCanvas(
     const scaleX = canvas.width / width
     const scaleY = canvas.height / height
     const timeScale = chart.timeScale()
-    ctx.font = `${11 * scaleY}px -apple-system, "Segoe UI", sans-serif`
+    ctx.font = `${(fontSize - 1) * scaleY}px -apple-system, "Segoe UI", sans-serif`
     marks.forEach((mark, i) => {
       // Snap to the nearest axis point first — timeToCoordinate returns null for any
       // time that isn't an exact data point, which silently dropped obs-date lines.
@@ -141,7 +146,7 @@ async function renderSeriesCanvas(
       ctx.fillStyle = '#B07800'
       ctx.textAlign = nearRightEdge ? 'right' : 'left'
       const tx = nearRightEdge ? px - 4 * scaleX : px + 4 * scaleX
-      const ty = (6 + (i % 4) * 14) * scaleY + 10 * scaleY
+      const ty = (6 + (i % 4) * (fontSize + 3)) * scaleY + 10 * scaleY
       ctx.fillText(mark.label, tx, ty)
     })
   }
@@ -194,7 +199,7 @@ async function productCardHtml(s: DetailProduct, accent: string): Promise<string
               <div class="series">
                 <div class="series-head">
                   <b>${ser.symbol}</b>
-                  <span class="muted">initial ${ser.initialPrice?.toFixed(2) ?? '-'} • ปัจจุบัน ${ser.currentPrice?.toFixed(2) ?? '-'}</span>
+                  <span class="muted">initial ${ser.initialPrice?.toFixed(2) ?? '-'}</span>
                   ${hitBadge}
                 </div>
                 <img src="${img}" width="100%" />
@@ -206,16 +211,12 @@ async function productCardHtml(s: DetailProduct, accent: string): Promise<string
   const facts = factsFor(s)
   const factsHtml = facts.map(([k, v]) => `<div class="fact"><span class="fact-k">${k}</span><span class="fact-v">${v}</span></div>`).join('')
 
-  // Non-KIKO products carry no rank/score (only KIKO is ranked).
-  const medal = s.rank == null ? '–' : s.rank <= 3 ? ['🥇', '🥈', '🥉'][s.rank - 1] : String(s.rank)
-
+  // Client-facing document — the internal rank/score never appears here (CSV keeps it).
   return `
     <section class="card">
       <div class="card-head" style="border-left-color:${accent}">
         <div class="card-title">
-          <span class="medal">${medal}</span>
           <b>${p.productCode ?? p.sourceFile}</b>
-          ${s.score == null ? '' : `<span class="score" style="color:${accent}">คะแนน ${s.score}</span>`}
         </div>
         <div class="summary">${p.summary || ''}</div>
       </div>
@@ -243,8 +244,6 @@ export async function printProductReport(s: DetailProduct, windowMonths: number)
     .card{border:1px solid #E2E0D5;border-radius:10px;margin-bottom:18px}
     .card-head{padding:14px 18px;border-left:5px solid;background:#F7F6F1;break-inside:avoid;page-break-inside:avoid}
     .card-title{display:flex;align-items:center;gap:10px;font-size:17px}
-    .medal{font-size:15px;color:#6B6A63}
-    .score{margin-left:auto;font-weight:700;font-size:15px}
     .summary{margin-top:8px;font-size:13.5px;color:#6B6A63;line-height:1.6}
     .facts{display:grid;grid-template-columns:repeat(3,1fr);gap:8px 18px;padding:14px 18px;font-size:13.5px;border-bottom:1px solid #E2E0D5;break-inside:avoid;page-break-inside:avoid}
     .fact{display:flex;justify-content:space-between;gap:8px;border-bottom:1px dashed #E2E0D5;padding:5px 0}
@@ -339,21 +338,24 @@ export async function downloadProductJpg(s: DetailProduct, windowMonths: number)
   const title = p.productCode ?? p.sourceFile
   const accent = bt.verdict === 'pass' ? '#0F6E56' : '#993C1D'
   const facts = factsFor(s)
-  const chartH = Math.round(JPG_CONTENT_W * (CHART_H / CHART_W))
+  // Taller than the PDF's chart ratio and bigger axis text — the JPG is read full-screen
+  // on a phone, where the print-sized chart came out too small.
+  const chartH = Math.round(JPG_CONTENT_W * 0.42)
 
   const seriesData = bt.error
     ? []
     : await Promise.all(
         bt.series.map(async (ser) => {
           const { levels, marks } = levelsAndMarksFor(ser, koTimes)
-          const canvas = await renderSeriesCanvas(ser.candles, levels, marks, JPG_CONTENT_W, chartH)
+          const canvas = await renderSeriesCanvas(ser.candles, levels, marks, JPG_CONTENT_W, chartH, 16)
           return { ser, canvas }
         }),
       )
 
   const meas = document.createElement('canvas').getContext('2d')!
 
-  const subtitle = `แบ็คเทสต์ย้อนหลัง ${windowMonths} เดือน • ${s.score == null ? 'ไม่จัดอันดับ (non-KIKO)' : `คะแนน ${s.score}`} • สร้างเมื่อ ${new Date().toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' })}`
+  // Client-facing image — no internal score/rank here (CSV keeps them).
+  const subtitle = `แบ็คเทสต์ย้อนหลัง ${windowMonths} เดือน • สร้างเมื่อ ${new Date().toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' })}`
   meas.font = F_TITLE
   const titleLines = wrapText(meas, title, JPG_CONTENT_W)
   meas.font = F_SUB
@@ -372,19 +374,25 @@ export async function downloadProductJpg(s: DetailProduct, windowMonths: number)
   const SUB_LH = 28
   const SUMMARY_LH = 30
   const FACT_LH = 34
-  const SERIES_HEAD_LH = 32
+  const SERIES_HEAD_LH = 30
   const FOOTER_LH = 24
 
+  // Facts render as a 2-column grid (5 rows instead of 10) to halve the dead space the
+  // old single-column list left on the right side of the image.
+  const FACT_COL_GAP = 48
+  const factColW = (JPG_CONTENT_W - FACT_COL_GAP) / 2
+  const factRows = Math.ceil(facts.length / 2)
+
   let h = JPG_MARGIN
-  h += titleLines.length * TITLE_LH + 8
-  h += subLines.length * SUB_LH + 16
-  h += summaryLines.length * SUMMARY_LH + (summaryLines.length ? 16 : 0)
-  h += 6 // accent rule
-  h += facts.length * FACT_LH + 20
+  h += titleLines.length * TITLE_LH + 6
+  h += subLines.length * SUB_LH + 12
+  h += summaryLines.length * SUMMARY_LH + (summaryLines.length ? 12 : 0)
+  h += 4 + 16 // accent rule + gap
+  h += factRows * FACT_LH + 12
   h += errorLines.length * SUMMARY_LH
   for (const { ser } of seriesData) {
     void ser
-    h += SERIES_HEAD_LH + chartH + 24
+    h += SERIES_HEAD_LH + chartH + 16
   }
   h += 12 // rule above footer
   h += footerLines.length * FOOTER_LH
@@ -406,14 +414,14 @@ export async function downloadProductJpg(s: DetailProduct, windowMonths: number)
     y += TITLE_LH
     ctx.fillText(l, JPG_MARGIN, y - 10)
   }
-  y += 8
+  y += 6
   ctx.font = F_SUB
   ctx.fillStyle = MUTED_COLOR
   for (const l of subLines) {
     y += SUB_LH
     ctx.fillText(l, JPG_MARGIN, y - 8)
   }
-  y += 16
+  y += 12
   if (summaryLines.length) {
     ctx.font = F_SUMMARY
     ctx.fillStyle = TEXT_COLOR
@@ -421,25 +429,28 @@ export async function downloadProductJpg(s: DetailProduct, windowMonths: number)
       y += SUMMARY_LH
       ctx.fillText(l, JPG_MARGIN, y - 8)
     }
-    y += 16
+    y += 12
   }
 
   ctx.fillStyle = accent
   ctx.fillRect(JPG_MARGIN, y, JPG_CONTENT_W, 4)
-  y += 6 + 20
+  y += 4 + 16
 
-  for (const [k, v] of facts) {
+  for (let i = 0; i < facts.length; i++) {
+    const [k, v] = facts[i]
+    const col = i % 2
+    const x0 = JPG_MARGIN + col * (factColW + FACT_COL_GAP)
     ctx.font = F_FACT_K
     ctx.fillStyle = MUTED_COLOR
-    ctx.fillText(k, JPG_MARGIN, y + 22)
+    ctx.fillText(k, x0, y + 22)
     ctx.font = F_FACT_V
     ctx.fillStyle = TEXT_COLOR
     ctx.textAlign = 'right'
-    ctx.fillText(v, JPG_MARGIN + JPG_CONTENT_W, y + 22)
+    ctx.fillText(v, x0 + factColW, y + 22)
     ctx.textAlign = 'left'
-    y += FACT_LH
+    if (col === 1 || i === facts.length - 1) y += FACT_LH
   }
-  y += 20
+  y += 12
 
   if (errorLines.length) {
     ctx.font = F_SUMMARY
@@ -455,12 +466,15 @@ export async function downloadProductJpg(s: DetailProduct, windowMonths: number)
     ctx.fillStyle = TEXT_COLOR
     y += SERIES_HEAD_LH
     ctx.fillText(ser.symbol, JPG_MARGIN, y - 8)
+    // Measure the symbol with the SAME bold font it was drawn in — measuring with the
+    // stale `meas` context (last set to the footer font) made the sub-text overlap it.
+    const symbolW = ctx.measureText(ser.symbol).width
     ctx.font = F_SERIES_SUB
     ctx.fillStyle = MUTED_COLOR
-    const subText = `initial ${ser.initialPrice?.toFixed(2) ?? '-'} • ปัจจุบัน ${ser.currentPrice?.toFixed(2) ?? '-'}${ser.knockedIn ? ' • ⚠ เคยชน KI' : ''}`
-    ctx.fillText(subText, JPG_MARGIN + meas.measureText(ser.symbol).width + 16, y - 8)
+    const subText = `initial ${ser.initialPrice?.toFixed(2) ?? '-'}${ser.knockedIn ? ' • ⚠ เคยชน KI' : ''}`
+    ctx.fillText(subText, JPG_MARGIN + symbolW + 14, y - 8)
     ctx.drawImage(chartCanvas, JPG_MARGIN, y, JPG_CONTENT_W, chartH)
-    y += chartH + 24
+    y += chartH + 16
   }
 
   ctx.strokeStyle = '#E2E0D5'

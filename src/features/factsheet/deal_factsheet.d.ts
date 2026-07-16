@@ -32,6 +32,11 @@ export interface Deal {
   notional?: number
   /** Currency for the notional display (e.g. "THB", "USD"). */
   currency?: string
+  /** Latest market closes keyed by underlying symbol — enables the reference-style
+   *  Spot / money-levels / shares-for-delivery basket layout. */
+  spots?: Record<string, number>
+  /** ISO date of the closes in `spots` (shown in the basket provenance note). */
+  spotAsOf?: string
 }
 
 /** Product keys with a verified real-deal mapper (9/13). Unmapped keys make

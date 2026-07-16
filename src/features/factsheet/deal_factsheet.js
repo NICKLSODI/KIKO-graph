@@ -155,14 +155,51 @@ function kikoData(deal){
            `คูปองคงที่ ${or(lv.coupon)} · Strike ที่ ${or(lv.strike)}`) },
   ];
 
-  // %-only basket (no Spot THB / shares / Selling Code — not provided in the short format)
-  const basket = {
-    cols_en: ['Underlying', 'Strike', 'Knock-Out', 'Knock-In'],
-    cols_th: ['หลักทรัพย์', 'Strike', 'Knock-Out', 'Knock-In'],
-    groups: [[null, (deal.underlyings.length ? deal.underlyings : ['—'])
-      .map(u => [u, '', or(lv.strike), or(lv.ko), or(lv.ki)])]],
-    ki_cols: [], ko_cols: [],
-  };
+  // Notional / currency first — the spot-based basket below needs them for share counts.
+  const notional = (typeof deal.notional === 'number' && deal.notional > 0) ? deal.notional : null;
+  const cur = deal.currency || 'THB';
+
+  // Spot-based basket (official reference layout — Spot / Strike / KO / KI in currency +
+  // Shares for Delivery) when latest market closes were supplied via deal.spots; the money
+  // levels are CALCULATED as stated-% × spot, and shares as notional ÷ strike rounded down
+  // to the board lot — arithmetic on real quotes, flagged as indicative in _basketNote.
+  // Falls back to the %-only basket when no spot data is available.
+  const spots = deal.spots || null;
+  const hasSpots = !!spots && deal.underlyings.some(u => num(spots[u]) != null);
+  const strikeP = num(lv.strike), koP = num(lv.ko), kiP = num(lv.ki);
+  let basket;
+  if (hasSpots) {
+    const lot = cur === 'THB' ? 100 : 1; // SET board lot; foreign markets deliver single shares
+    const money = (sp, p) => (sp != null && p != null) ? sp * p / 100 : null;
+    const f2 = v => v == null ? '—' : v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    basket = {
+      // Column order feeds _basketKH2's role detection (spot/strike/knock-out/knock-in
+      // level/knock-in/shares) — it renders the full %-and-money grid itself.
+      cols_en: ['Stock', 'Spot', 'Strike', 'Knock-Out', 'Knock-In Level', 'Knock-In', 'Shares for Delivery'],
+      cols_th: ['หลักทรัพย์', 'Spot', 'Strike', 'Knock-Out', 'Knock-In Level', 'Knock-In', 'จำนวนหุ้นส่งมอบ'],
+      cur,
+      groups: [[null, (deal.underlyings.length ? deal.underlyings : ['—']).map(u => {
+        const sp = num(spots[u]);
+        const st = money(sp, strikeP), ko = money(sp, koP), ki = money(sp, kiP);
+        const shares = (notional != null && st) ? Math.floor(notional / st / lot) * lot : null;
+        return [u, '', f2(sp), f2(st), f2(ko), kiP != null ? kiP.toFixed(2) + '%' : or(lv.ki), f2(ki),
+                shares == null ? '' : shares.toLocaleString('en-US')];
+      })]],
+      ki_cols: [], ko_cols: [],
+    };
+  } else {
+    // %-only basket (no Spot THB / shares / Selling Code — not provided in the short format)
+    basket = {
+      cols_en: ['Underlying', 'Strike', 'Knock-Out', 'Knock-In'],
+      cols_th: ['หลักทรัพย์', 'Strike', 'Knock-Out', 'Knock-In'],
+      groups: [[null, (deal.underlyings.length ? deal.underlyings : ['—'])
+        .map(u => [u, '', or(lv.strike), or(lv.ko), or(lv.ki)])]],
+      ki_cols: [], ko_cols: [],
+    };
+  }
+  const basketNote = hasSpots ? L(
+    `<b>Spot prices:</b> latest available market close${deal.spotAsOf ? ' (as of ' + _displayDate(deal.spotAsOf) + ')' : ''} — ${cur} levels and share counts are calculated from Spot × the stated % levels and are indicative until fixed on the trade date.`,
+    `<b>ราคา Spot:</b> ราคาปิดตลาดล่าสุด${deal.spotAsOf ? ' (ณ ' + _displayDate(deal.spotAsOf) + ')' : ''} — ระดับราคา${cur === 'THB' ? 'เป็นบาท' : 'สกุล ' + cur} และจำนวนหุ้นคำนวณจาก Spot × % ที่ระบุ เป็นค่าโดยประมาณจนกว่าจะกำหนดจริง ณ วันซื้อขาย`) : null;
 
   const issuer = deal.issuer;
   const payoffNote = L(
@@ -175,8 +212,6 @@ function kikoData(deal){
   // Notional (optional) turns on subscription + net-interest displays, matching the
   // illustrative reference. Net interest applies Thai WHT only for THB notes (avoids
   // asserting a Thai tax rate on foreign-currency deals).
-  const notional = (typeof deal.notional === 'number' && deal.notional > 0) ? deal.notional : null;
-  const cur = deal.currency || 'THB';
   const couponPct = num(lv.coupon);
   const ppy = _periodsPerYear(lv.koObs);
   // Net-interest-after-tax is shown only for MONTHLY THB notes: the render engine's built-in
@@ -214,6 +249,7 @@ function kikoData(deal){
     dates: datesFor(deal.dates),
     conds, basket, schedule,
     _payoffNote: payoffNote,
+    _basketNote: basketNote,
     _scheduleNote: scheduleNote,
     _dealNotes: dealNotes(deal.notes),
   };
