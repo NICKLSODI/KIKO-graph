@@ -12,68 +12,81 @@
 :root {
   color-scheme: light;
 
+  /* primary — violet action colour (buttons, selected pills, links), matching the
+     InnovestX app. Distinct from teal/coral, which stay reserved for up/down semantics. */
+  --c-primary: #5b5bef;
+  --c-primary-light: #ecebfe;
+  --c-primary-border: #c9c7fb;
+  --c-on-primary: #ffffff;
+
   /* brand */
-  --c-navy: #0b3d56;
-  --c-teal: #0f6e56;
-  --c-teal-light: #e1f5ee;
+  --c-navy: #5b5bef;
+  --c-teal: #0a8f63; /* positive / pass — vivid market green */
+  --c-teal-light: #e3f6ee;
   --c-teal-border: #9fe1cb;
-  --c-coral: #993c1d;
-  --c-coral-light: #faece7;
-  --c-coral-border: #f0997b;
+  --c-coral: #d62f2f; /* negative / knocked — market red */
+  --c-coral-light: #fdeaea;
+  --c-coral-border: #f2b0b0;
   --c-amber: #854f0b;
   --c-amber-light: #faeeda;
   --c-amber-border: #ef9f27;
 
   /* neutrals */
-  --c-bg: #f7f6f1;
+  --c-bg: #f6f6f8;
   --c-surface: #ffffff;
-  --c-border: #e2e0d5;
-  --c-text: #27261f;
-  --c-muted: #6b6a63;
+  --c-border: #e5e5ea;
+  --c-text: #1a1a1f;
+  --c-muted: #6e6e78;
 
   /* semantic */
-  --c-danger: #b3261e;
-  --c-focus: #2f7fd0;
+  --c-danger: #d62f2f;
+  --c-focus: #4a9eff;
   --c-mark: rgba(237, 161, 0, 0.85);
   --c-mark-text: #b07800;
-  --c-overlay: rgba(20, 18, 14, 0.55);
+  --c-overlay: rgba(18, 18, 24, 0.5);
 
   /* depth */
-  --shadow-card: 0 1px 2px rgba(30, 28, 20, 0.05), 0 4px 16px rgba(30, 28, 20, 0.06);
-  --shadow-pop: 0 4px 12px rgba(30, 28, 20, 0.12), 0 12px 40px rgba(30, 28, 20, 0.18);
+  --shadow-card: 0 1px 2px rgba(20, 20, 30, 0.05), 0 4px 16px rgba(20, 20, 30, 0.06);
+  --shadow-pop: 0 4px 12px rgba(20, 20, 30, 0.12), 0 12px 40px rgba(20, 20, 30, 0.18);
 }
 
 [data-theme='dark'] {
   color-scheme: dark;
 
-  /* brand — re-tuned for dark surfaces, not inverted */
-  --c-navy: #8fc1e3;
-  --c-teal: #4cc39a;
-  --c-teal-light: #14332a;
-  --c-teal-border: #2a5c4b;
-  --c-coral: #ee9068;
-  --c-coral-light: #362019;
-  --c-coral-border: #7a4630;
-  --c-amber: #e9b45c;
-  --c-amber-light: #34290f;
-  --c-amber-border: #7a5c22;
+  /* primary — brighter violet so it reads on near-black */
+  --c-primary: #6d6af5;
+  --c-primary-light: #1c1a33;
+  --c-primary-border: #3a3578;
+  --c-on-primary: #ffffff;
 
-  /* neutrals — warm charcoal to match the cream light theme */
-  --c-bg: #171614;
-  --c-surface: #22211e;
-  --c-border: #3a3833;
-  --c-text: #eceae4;
-  --c-muted: #a5a29a;
+  /* brand — tuned for near-black surfaces */
+  --c-navy: #8f8cf8;
+  --c-teal: #22c48a; /* positive / pass — vivid green like the app */
+  --c-teal-light: #10281f;
+  --c-teal-border: #1f5540;
+  --c-coral: #f56565; /* negative / knocked — red like the app */
+  --c-coral-light: #2c1414;
+  --c-coral-border: #6e2e2e;
+  --c-amber: #e9b45c;
+  --c-amber-light: #322611;
+  --c-amber-border: #6e5322;
+
+  /* neutrals — near-black like the InnovestX app */
+  --c-bg: #0a0a0b;
+  --c-surface: #151517;
+  --c-border: #262629;
+  --c-text: #f4f4f6;
+  --c-muted: #8e8e96;
 
   /* semantic */
-  --c-danger: #f2867e;
-  --c-focus: #7db4e8;
+  --c-danger: #f56565;
+  --c-focus: #4a9eff;
   --c-mark: rgba(233, 180, 92, 0.8);
   --c-mark-text: #e9b45c;
-  --c-overlay: rgba(0, 0, 0, 0.65);
+  --c-overlay: rgba(0, 0, 0, 0.7);
 
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 16px rgba(0, 0, 0, 0.35);
-  --shadow-pop: 0 4px 12px rgba(0, 0, 0, 0.5), 0 12px 40px rgba(0, 0, 0, 0.55);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.5), 0 4px 16px rgba(0, 0, 0, 0.45);
+  --shadow-pop: 0 4px 12px rgba(0, 0, 0, 0.6), 0 12px 40px rgba(0, 0, 0, 0.65);
 }
 
 * {
@@ -166,7 +179,7 @@ button:disabled {
 /* Primary / secondary nav buttons */
 .btn-primary:hover:not(:disabled) {
   filter: brightness(1.1);
-  box-shadow: 0 2px 8px rgba(15, 110, 86, 0.35);
+  box-shadow: 0 2px 10px rgba(91, 91, 239, 0.4);
 }
 .btn-primary:active:not(:disabled) {
   transform: translateY(1px);
@@ -223,7 +236,7 @@ button:disabled {
 }
 .brand-mark::before {
   content: '▚ ';
-  color: var(--c-teal);
+  color: var(--c-primary);
 }
 .brand-sub {
   font-size: 11.5px;
@@ -251,6 +264,43 @@ button:disabled {
 }
 .theme-toggle:active {
   transform: scale(0.96);
+}
+
+/* Persona builder — sticky preview rail + form column */
+.persona-layout {
+  display: grid;
+  grid-template-columns: 272px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.persona-preview {
+  position: sticky;
+  top: 16px;
+}
+@media (max-width: 800px) {
+  .persona-layout {
+    grid-template-columns: 1fr;
+  }
+  .persona-preview {
+    position: static;
+  }
+}
+
+/* Flow nav — sticky bottom bar shared by every wizard screen */
+.flow-nav {
+  position: sticky;
+  bottom: 12px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 10px 12px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-pop);
 }
 
 /* Stat tiles — dashboard summary strip */
@@ -384,9 +434,22 @@ button:disabled {
   background: var(--c-teal-light);
 }
 
-/* Table rows */
+/* Tables — bordered container, tinted header row, neutral hover */
+.table-wrap {
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  overflow-x: auto;
+}
+.table-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.table-wrap thead th {
+  background: var(--c-bg);
+  border-bottom: 1px solid var(--c-border);
+}
 .row-hover:hover td {
-  background: color-mix(in srgb, var(--c-teal-light) 45%, transparent);
+  background: color-mix(in srgb, var(--c-primary-light) 40%, transparent);
 }
 
 .spin {

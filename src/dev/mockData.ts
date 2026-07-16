@@ -79,7 +79,7 @@ const product1: NoteProduct = {
   underlyings: ['AAPL', 'MSFT'],
   initialPrices: [150, 300],
   market: 'foreign',
-  structureType: 'KIKO',
+  structureType: 'kiko',
   strikePct: 100,
   kiPct: 75,
   koPct: 105,
@@ -92,6 +92,7 @@ const product1: NoteProduct = {
   koObservationFrequency: null,
   koType: 'memory',
   summary: 'KIKO ที่มี AAPL และ MSFT เป็นหุ้นอ้างอิง อัตราดอกเบี้ย 12% ต่อปี ชน KI ที่ 75% และ KO ที่ 105%',
+  variantFields: null,
   raw: 'Raw term sheet data for AAPL/MSFT',
   sourceFile: 'term_sheet_aapl_msft.pdf',
 }
@@ -103,6 +104,7 @@ const backtest1: BacktestResult = {
   bufferPct: 15.5,
   volatilityPct: 22.4,
   windowMonths: 6,
+  chartReady: true,
   error: null,
   warnings: [],
   series: [
@@ -144,7 +146,7 @@ const product2: NoteProduct = {
   underlyings: ['PTT', 'CPALL'],
   initialPrices: [34, 58],
   market: 'thai',
-  structureType: 'KIKO',
+  structureType: 'kiko',
   strikePct: 100,
   kiPct: 80,
   koPct: 108,
@@ -157,6 +159,7 @@ const product2: NoteProduct = {
   koObservationFrequency: null,
   koType: 'final-valuation',
   summary: 'KIKO อ้างอิง PTT และ CPALL ดอกเบี้ย 9.5% ต่อปี ชน KI ที่ 80% และ KO ที่ 108%',
+  variantFields: null,
   raw: 'Raw term sheet data for PTT/CPALL',
   sourceFile: 'term_sheet_ptt_cpall.pdf',
 }
@@ -168,6 +171,7 @@ const backtest2: BacktestResult = {
   bufferPct: -2.3,
   volatilityPct: 18.7,
   windowMonths: 12,
+  chartReady: true,
   error: null,
   warnings: [],
   series: [

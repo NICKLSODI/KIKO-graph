@@ -1,64 +1,130 @@
 import { C } from '../theme'
-import { Screen, Card, StepDots, NavBtn, Field, PillGroup } from '../ui/components'
-import { TONE_OPTIONS, FOCUS_OPTIONS, SCRIPT_FORMATS, DURATION_OPTIONS, type ScriptFormatKey } from '../constants'
+import { FlowShell, FlowNav, Card, Field, PillGroup, IconOptions } from '../ui/components'
+import {
+  IconBriefcase, IconSmile, IconMessageCircle, IconGem, IconPhone, IconMail,
+  IconHelpCircle, IconUsers, IconSparkles, IconReceipt, IconLayers, IconScale, IconAlertTriangle,
+} from '../ui/icons'
+import { TONE_OPTIONS, FOCUS_OPTIONS, DURATION_OPTIONS, type ScriptFormatKey } from '../constants'
 import type { AppState, Patch } from '../store'
 
-const PERSONA_LABELS = ['ดึงข้อมูล', 'โปรไฟล์ลูกค้า', 'ตั้งค่า Output', 'ผลลัพธ์']
+/* Presentation-only metadata — `value` is the canonical string from
+   constants.ts (what the store and AI prompts consume). */
+
+const TONE_CARDS = [
+  { value: TONE_OPTIONS[0], icon: <IconBriefcase size={19} />, label: 'ทางการ', sub: 'Professional' },
+  { value: TONE_OPTIONS[1], icon: <IconSmile size={19} />, label: 'เป็นกันเอง', sub: 'Friendly', tone: 'teal' as const },
+  { value: TONE_OPTIONS[2], icon: <IconMessageCircle size={19} />, label: 'เข้าใจง่าย', sub: 'Plain Language' },
+  { value: TONE_OPTIONS[3], icon: <IconGem size={19} />, label: 'พรีเมียม', sub: 'Premium', tone: 'amber' as const },
+]
+
+const FOCUS_CHIPS = [
+  { value: FOCUS_OPTIONS[0], label: <><IconSparkles size={13} />จุดเด่นผลิตภัณฑ์</> },
+  { value: FOCUS_OPTIONS[1], label: <><IconReceipt size={13} />ค่าธรรมเนียม</> },
+  { value: FOCUS_OPTIONS[2], label: <><IconLayers size={13} />เงื่อนไข KI/KO</> },
+  { value: FOCUS_OPTIONS[3], label: <><IconAlertTriangle size={13} />ความเสี่ยงสำคัญ</> },
+  { value: FOCUS_OPTIONS[4], label: <><IconScale size={13} />เทียบทางเลือกอื่น</> },
+]
+
+const FORMAT_CARDS: { value: ScriptFormatKey; icon: React.ReactNode; label: string; sub: string }[] = [
+  { value: 'callScript', icon: <IconPhone size={19} />, label: 'Call Script', sub: 'บทพูดโทรศัพท์ฉบับเต็ม' },
+  { value: 'lineMessage', icon: <IconMessageCircle size={19} />, label: 'LINE', sub: 'ข้อความสั้นส่งแชท' },
+  { value: 'email', icon: <IconMail size={19} />, label: 'Email', sub: 'จดหมายทางการ' },
+  { value: 'faq', icon: <IconHelpCircle size={19} />, label: 'FAQ', sub: 'คำถาม-คำตอบพบบ่อย' },
+  { value: 'rolePlay', icon: <IconUsers size={19} />, label: 'Role-play', sub: 'บทฝึกตอบข้อโต้แย้ง' },
+]
+
+function SectionHead({ n, title, desc }: { n: string; title: string; desc?: string }) {
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span
+          className="num"
+          style={{
+            fontSize: 11, fontWeight: 600, color: C.primary, background: C.primaryLight,
+            border: `1px solid ${C.primaryBorder}`, borderRadius: 6, padding: '1px 7px',
+          }}
+        >
+          {n}
+        </span>
+        <span style={{ fontSize: 15, fontWeight: 600, color: C.text }}>{title}</span>
+      </div>
+      {desc && <div style={{ fontSize: 12.5, color: C.muted, marginTop: 3 }}>{desc}</div>}
+    </div>
+  )
+}
 
 export function ScriptConfigScreen({ state, patch }: { state: AppState; patch: Patch }) {
   const ready = state.scriptFormats.length > 0
 
-  function toggleFormat(key: ScriptFormatKey) {
-    const has = state.scriptFormats.includes(key)
-    patch({ scriptFormats: has ? state.scriptFormats.filter((k) => k !== key) : [...state.scriptFormats, key] })
+  function toggleFormat(key: string) {
+    const k = key as ScriptFormatKey
+    const has = state.scriptFormats.includes(k)
+    patch({ scriptFormats: has ? state.scriptFormats.filter((x) => x !== k) : [...state.scriptFormats, k] })
   }
 
   return (
-    <Screen>
-      <StepDots step={3} labels={PERSONA_LABELS} />
-      <Card>
-        <div style={{ fontSize: 17, fontWeight: 600, color: C.text, marginBottom: 18 }}>Output Configurations</div>
-        <Field label="รูปแบบน้ำเสียงในการนำเสนอ">
-          <PillGroup value={state.tone} onChange={(v) => patch({ tone: v })} options={TONE_OPTIONS} />
-        </Field>
-        <Field label="ประเด็นที่ต้องเน้นเป็นพิเศษ (เลือกได้มากกว่า 1)">
-          <PillGroup multi value={state.focus} onChange={(v) => patch({ focus: v })} options={FOCUS_OPTIONS} />
-        </Field>
-        <Field label="รูปแบบผลลัพธ์ที่ต้องการจัดเตรียม">
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {SCRIPT_FORMATS.map((o) => {
-              const sel = state.scriptFormats.includes(o.key)
-              return (
-                <div key={o.key} style={{ borderRadius: 10, border: `1px solid ${sel ? C.teal : C.border}`, background: sel ? C.tealLight : C.white, overflow: 'hidden' }}>
-                  <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '12px 14px', cursor: 'pointer' }}>
-                    <input type="checkbox" checked={sel} onChange={() => toggleFormat(o.key)} style={{ marginTop: 2 }} />
-                    <div>
-                      <div style={{ fontSize: 14, fontWeight: 600, color: sel ? C.teal : C.text }}>{o.label}</div>
-                      <div style={{ fontSize: 12.5, color: C.muted }}>{o.desc}</div>
-                    </div>
-                  </label>
-                  {sel && o.key === 'callScript' && (
-                    <div style={{ padding: '0 14px 14px 40px' }}>
-                      <div style={{ fontSize: 12.5, fontWeight: 600, color: C.text, marginBottom: 6 }}>ระยะเวลาที่ต้องการใช้พูดจริง</div>
-                      <PillGroup
-                        value={DURATION_OPTIONS.find((d) => d.minutes === state.durationMinutes)?.label || DURATION_OPTIONS[1].label}
-                        onChange={(label) => patch({ durationMinutes: (DURATION_OPTIONS.find((d) => d.label === label) || DURATION_OPTIONS[1]).minutes })}
-                        options={DURATION_OPTIONS.map((d) => d.label)}
-                      />
-                    </div>
-                  )}
-                </div>
-              )
-            })}
-          </div>
-        </Field>
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 24 }}>
-          <NavBtn onClick={() => patch({ screen: 'persona' })} secondary>กลับสู่ขั้นตอนก่อนหน้า</NavBtn>
-          <NavBtn onClick={() => patch({ screen: 'scriptResults' })} disabled={!ready}>
-            {ready ? 'ไปยังผลลัพธ์ →' : 'เลือกอย่างน้อย 1 รูปแบบ'}
-          </NavBtn>
-        </div>
-      </Card>
-    </Screen>
+    <FlowShell
+      step={3}
+      maxWidth={680}
+      title="ตั้งค่า Output"
+      subtitle="เลือกน้ำเสียง ประเด็นเน้น และรูปแบบผลลัพธ์ที่ต้องการ"
+      product={state.retrieved?.productName ?? state.selectedProduct?.productCode ?? null}
+      onStepClick={(n) => {
+        if (n === 1) patch({ screen: 'backtest' })
+        if (n === 2) patch({ screen: 'persona' })
+      }}
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <Card>
+          <SectionHead n="01" title="น้ำเสียงในการนำเสนอ" desc="กำหนดบุคลิกของภาษาที่ใช้ทั้งชุด" />
+          <IconOptions
+            value={state.tone}
+            onChange={(v) => patch({ tone: v })}
+            options={TONE_CARDS}
+            minWidth={140}
+          />
+        </Card>
+
+        <Card>
+          <SectionHead n="02" title="ประเด็นที่เน้นเป็นพิเศษ" desc="เลือกได้มากกว่า 1 หรือข้ามได้" />
+          <PillGroup multi value={state.focus} onChange={(v) => patch({ focus: v })} options={FOCUS_CHIPS} />
+        </Card>
+
+        <Card>
+          <SectionHead n="03" title="รูปแบบผลลัพธ์" desc="เลือกอย่างน้อย 1 รูปแบบ — สร้างพร้อมกันได้หลายแบบ" />
+          <IconOptions
+            multi
+            value={state.scriptFormats}
+            onChange={toggleFormat}
+            options={FORMAT_CARDS}
+            minWidth={118}
+          />
+          {state.scriptFormats.includes('callScript') && (
+            <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
+              <Field label="ระยะเวลาที่ใช้พูดจริง (Call Script)">
+                <PillGroup
+                  value={String(state.durationMinutes)}
+                  onChange={(v) => patch({ durationMinutes: +v })}
+                  options={DURATION_OPTIONS.map((d) => ({
+                    value: String(d.minutes),
+                    label: `${d.minutes} นาที · ${d.minutes === 5 ? 'กระชับ' : 'มาตรฐาน'}`,
+                  }))}
+                />
+              </Field>
+            </div>
+          )}
+        </Card>
+
+        <FlowNav
+          back={{ label: 'โปรไฟล์ลูกค้า', onClick: () => patch({ screen: 'persona' }) }}
+          next={{
+            label: 'ไปยังผลลัพธ์',
+            onClick: () => patch({ screen: 'scriptResults' }),
+            disabled: !ready,
+            hint: 'เลือกรูปแบบผลลัพธ์อย่างน้อย 1 แบบ',
+          }}
+        />
+      </div>
+    </FlowShell>
   )
 }

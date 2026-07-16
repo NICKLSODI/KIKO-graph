@@ -1,29 +1,21 @@
+import { lazy, Suspense } from 'react'
 import { useStore } from './store'
-import { Landing } from './screens/Landing'
-import { InputScreen } from './screens/InputScreen'
-import { ChooseOutput } from './screens/ChooseOutput'
-import { RetrieveScreen } from './screens/RetrieveScreen'
-import { GraphScreen } from './screens/GraphScreen'
 import { PersonaScreen } from './screens/PersonaScreen'
 import { ScriptConfigScreen } from './screens/ScriptConfigScreen'
 import { ScriptResultsScreen } from './screens/ScriptResultsScreen'
-import { FactsheetScreen } from './screens/FactsheetScreen'
 import { BacktestDashboard } from './screens/backtest/BacktestDashboard'
 
+// Lazy: the factsheet render engine (templates + embedded logo) is ~160 kB of source that
+// only the Factsheet screen needs — keep it out of the dashboard's initial chunk.
+const FactsheetScreen = lazy(() => import('./screens/FactsheetScreen').then((m) => ({ default: m.FactsheetScreen })))
+
+// Main flow: Backtest & Rank dashboard (upload → extract → rank KIKO → detail/graph),
+// then per-product continuations: script generator (persona → config → results) and
+// factsheet generator. The old single-product wizard was replaced by this flow.
 export default function App() {
   const { state, patch, reset } = useStore()
 
   switch (state.screen) {
-    case 'landing':
-      return <Landing patch={patch} />
-    case 'input':
-      return <InputScreen state={state} patch={patch} />
-    case 'chooseOutput':
-      return <ChooseOutput state={state} patch={patch} />
-    case 'retrieve':
-      return <RetrieveScreen state={state} patch={patch} />
-    case 'graph':
-      return <GraphScreen state={state} patch={patch} />
     case 'persona':
       return <PersonaScreen state={state} patch={patch} />
     case 'scriptConfig':
@@ -31,10 +23,12 @@ export default function App() {
     case 'scriptResults':
       return <ScriptResultsScreen state={state} patch={patch} onReset={reset} />
     case 'factsheet':
-      return <FactsheetScreen state={state} patch={patch} />
-    case 'backtest':
-      return <BacktestDashboard patch={patch} />
+      return (
+        <Suspense fallback={null}>
+          <FactsheetScreen state={state} patch={patch} />
+        </Suspense>
+      )
     default:
-      return <Landing patch={patch} />
+      return <BacktestDashboard patch={patch} />
   }
 }

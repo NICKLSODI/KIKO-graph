@@ -2,6 +2,11 @@
 // index.css), so all inline styles across the app restyle automatically when
 // the data-theme attribute flips. Do NOT put raw hex here — put it in index.css.
 export const C = {
+  // violet action colour — buttons, selected pills, primary CTAs (not up/down semantics)
+  primary: 'var(--c-primary)',
+  primaryLight: 'var(--c-primary-light)',
+  primaryBorder: 'var(--c-primary-border)',
+  onPrimary: 'var(--c-on-primary)',
   navy: 'var(--c-navy)',
   teal: 'var(--c-teal)',
   tealLight: 'var(--c-teal-light)',
@@ -19,6 +24,18 @@ export const C = {
   white: 'var(--c-surface)', // semantic "surface" — dark charcoal in dark mode
   danger: 'var(--c-danger)',
 } as const
+
+/* Semantic tones for selectable options — teal = safe/positive, amber =
+   caution/premium, coral = high-risk/negative, primary = neutral action.
+   `light` doubles as the readable foreground when `main` is the background
+   (each pair is tuned for contrast in both themes). */
+export const TONES = {
+  primary: { main: C.primary, light: C.primaryLight, border: C.primaryBorder },
+  teal: { main: C.teal, light: C.tealLight, border: C.tealBorder },
+  amber: { main: C.amber, light: C.amberLight, border: C.amberBorder },
+  coral: { main: C.coral, light: C.coralLight, border: C.coralBorder },
+} as const
+export type Tone = keyof typeof TONES
 
 export const FONT = "'IBM Plex Sans Thai Looped', -apple-system, BlinkMacSystemFont, 'Segoe UI', Tahoma, sans-serif"
 export const FONT_MONO = "'IBM Plex Mono', ui-monospace, 'Cascadia Mono', monospace"

@@ -25,6 +25,42 @@ export async function generate(prompt: string, file?: GenerateFile): Promise<str
   return text
 }
 
+// Cache text-only replies by prompt hash. A structured-note script depends only on its
+// prompt (product facts + persona + format), so regenerating the same tab, or flipping a
+// persona field back to a previous value, should never pay the model again. Each `claude -p`
+// call carries the full Claude Code CLI system prompt as fixed overhead, so avoiding a
+// redundant call is a real token saving, not just latency.
+const GENERATE_CACHE_PREFIX = 'kiko-generate:'
+
+async function promptHash(prompt: string): Promise<string> {
+  const data = new TextEncoder().encode(prompt)
+  const digest = await crypto.subtle.digest('SHA-256', data)
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** generate() with a localStorage cache keyed by the prompt. Text prompts only (no file).
+ *  Pass `force: true` to bypass the cache and overwrite it with a fresh reply. */
+export async function generateCached(prompt: string, force = false): Promise<string> {
+  const key = GENERATE_CACHE_PREFIX + (await promptHash(prompt))
+  if (!force) {
+    try {
+      const hit = localStorage.getItem(key)
+      if (hit) return hit
+    } catch { /* ignore */ }
+  }
+  const text = await generate(prompt)
+  try {
+    localStorage.setItem(key, text)
+  } catch {
+    // quota full — evict this module's entries and retry once
+    try {
+      Object.keys(localStorage).filter((k) => k.startsWith(GENERATE_CACHE_PREFIX)).forEach((k) => localStorage.removeItem(k))
+      localStorage.setItem(key, text)
+    } catch { /* give up silently */ }
+  }
+  return text
+}
+
 export type ExtractSource =
   | { kind: 'text'; text: string }
   | { kind: 'link'; link: string }

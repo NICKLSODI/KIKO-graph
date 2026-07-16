@@ -48,6 +48,10 @@ export const FOCUS_OPTIONS = [
   'การเปรียบเทียบกับทางเลือกการลงทุนอื่น',
 ]
 
+// Script-generation flow steps (dashboard → persona → config → results) — shared by
+// every wizard screen so the stepper reads identically across the flow.
+export const FLOW_STEPS = ['เลือกผลิตภัณฑ์', 'โปรไฟล์ลูกค้า', 'ตั้งค่า Output', 'ผลลัพธ์']
+
 // Script sub-formats (memie's OUTPUT_TYPES minus factsheet — factsheet is now a top-level category).
 export type ScriptFormatKey = 'callScript' | 'lineMessage' | 'email' | 'faq' | 'rolePlay'
 export const SCRIPT_FORMATS: { key: ScriptFormatKey; label: string; desc: string }[] = [

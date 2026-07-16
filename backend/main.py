@@ -201,7 +201,11 @@ def generate(payload: dict = Body(...)):
         else:
             # Scanned PDF or image — Claude Code must view the file itself.
             tmpdir = tempfile.mkdtemp(prefix="kiko_")
-            safe_name = os.path.basename(file.get("name") or "document")
+            # Restrict to a safe charset — on Windows this path is later embedded in a
+            # cmd.exe-parsed command line (see shell=True below), so metacharacters like
+            # & | ^ % in an attacker-chosen filename must not survive into it.
+            raw_name = os.path.basename(file.get("name") or "document")
+            safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", raw_name) or "document"
             fpath = os.path.join(tmpdir, safe_name)
             with open(fpath, "wb") as fh:
                 fh.write(file_bytes)
@@ -220,6 +224,10 @@ def generate(payload: dict = Body(...)):
             encoding="utf-8",
             timeout=CLAUDE_TIMEOUT_SECONDS,
             env=child_env,
+            # `claude` on Windows is an npm .cmd shim — CreateProcess can't launch .cmd/.bat
+            # directly (WinError 2), it needs cmd.exe as the interpreter. shell=True routes
+            # through cmd.exe; posix doesn't need it since `claude` there is a real executable.
+            shell=(os.name == "nt"),
         )
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="Claude Code ใช้เวลานานเกินไป (timeout)")

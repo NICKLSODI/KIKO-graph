@@ -1,15 +1,18 @@
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { C } from '../../theme'
-import { Screen, Card, NavBtn } from '../../ui/components'
+import { Screen, Card, NavBtn, IconOptions } from '../../ui/components'
+import { IconUpload, IconSearch, IconBarChart, IconTrophy, IconChevronRight, IconFileText, IconLink, IconAlignLeft, IconCheck } from '../../ui/icons'
 import { CandleChart } from '../../components/CandleChart'
 import type { GenerateFile } from '../../api/generate'
-import { extractNote, type NoteSource } from '../../features/backtest/extract'
+import { extractNote, extractNotesFromTextChunked, type NoteSource } from '../../features/backtest/extract'
 import { koTimesFor, levelsAndMarksFor } from '../../features/backtest/chartData'
 import type { InputMode } from '../../types'
-import { backtest } from '../../features/backtest/engine'
+import { backtestScore, backtestDetail } from '../../features/backtest/engine'
 import { scoreProducts, weightsFor, PROFILE_LABELS, DEFAULT_CUSTOM_WEIGHTS } from '../../features/backtest/scoring'
-import { exportCsv, printProductReport } from '../../features/backtest/exportReport'
-import type { BacktestResult, NoteProduct, ProfileKey, ScoredProduct, ScoreWeights } from '../../features/backtest/types'
+import { exportCsv, printProductReport, downloadProductJpg } from '../../features/backtest/exportReport'
+import type { BacktestResult, DetailProduct, NoteProduct, ProfileKey, ScoredProduct, ScoreWeights } from '../../features/backtest/types'
+import { STRUCTURE_TYPE_LABELS } from '../../features/backtest/types'
+import type { RetrievedProductData } from '../../features/ingest/ingest'
 import type { Patch } from '../../store'
 import { MOCK_BACKTEST_BUNDLE } from '../../dev/mockData'
 
@@ -53,7 +56,74 @@ function blobUrlFor(file: GenerateFile): string {
   return URL.createObjectURL(new Blob([arr], { type: file.mediaType }))
 }
 
-type DataSource = 'upload' | 'mock'
+// The landing hero's pipeline strip — mirrors what run() actually does.
+const PIPELINE = [
+  { icon: <IconUpload size={14} />, label: 'อัปโหลด' },
+  { icon: <IconSearch size={14} />, label: 'สกัดข้อมูล' },
+  { icon: <IconBarChart size={14} />, label: 'แบ็คเทสต์' },
+  { icon: <IconTrophy size={14} />, label: 'จัดอันดับ' },
+]
+
+/** stage: -1 = none highlighted (idle upload), 0..3 = that pipeline step is live. */
+function PipelineStrip({ stage }: { stage: number }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, marginBottom: 20, flexWrap: 'wrap' }}>
+      {PIPELINE.map((p, i) => {
+        const active = i === stage
+        const done = stage >= 0 && i < stage
+        return (
+          <Fragment key={p.label}>
+            {i > 0 && <IconChevronRight size={12} style={{ color: C.muted, opacity: 0.6, flexShrink: 0 }} />}
+            <span
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 11px', borderRadius: 999, fontSize: 12,
+                border: `1px solid ${active ? C.primaryBorder : done ? C.tealBorder : C.border}`,
+                background: active ? C.primaryLight : done ? C.tealLight : C.white,
+                color: active ? C.primary : done ? C.teal : C.muted,
+                fontWeight: active ? 600 : 400,
+              }}
+            >
+              {p.icon}{p.label}
+            </span>
+          </Fragment>
+        )
+      })}
+    </div>
+  )
+}
+
+// Map a batch product to the wizard's retrieved-data shape so the existing script screens
+// (persona → config → results) can generate from it unchanged. raw carries the full
+// extraction JSON, which the script prompt reuses as its fact source.
+function toRetrieved(p: NoteProduct): RetrievedProductData {
+  return {
+    summary: p.summary,
+    productName: p.productCode ?? p.sourceFile,
+    productType: STRUCTURE_TYPE_LABELS[p.structureType],
+    strike: p.strikePct,
+    knockIn: p.kiPct,
+    knockOut: p.koPct,
+    fixingDate: p.fixingDate,
+    observationDates: p.observationDates,
+    maturityDate: p.variantFields?.maturityDate ?? null,
+    underlyingSymbol: p.underlyings[0] ?? null,
+    market: p.market,
+    raw: p.raw,
+  }
+}
+
+// The script/factsheet screens replace this component while the user works on one product —
+// keep the last computed batch alive for the page's lifetime so returning is instant
+// (no re-extract, no re-backtest). sessionStorage still covers a full refresh.
+interface ResumeState {
+  products: NoteProduct[]
+  items: Item[]
+  windowMonths: number
+  fileById: Record<string, GenerateFile>
+  selectedId: string | null
+  view: 'summary' | 'detail'
+}
+let RESUME: ResumeState | null = null
 
 // Survive an accidental refresh: extracted products are paid-for (model tokens), so keep
 // them for the tab's lifetime. Candles/backtests are cheap to recompute and NOT stored.
@@ -77,33 +147,52 @@ function loadSession(): { prods: NoteProduct[]; wm: number } | null {
 }
 
 export function BacktestDashboard({ patch }: { patch: Patch }) {
-  const [phase, setPhase] = useState<Phase>('upload')
-  const [dataSource, setDataSource] = useState<DataSource>('upload')
+  const [phase, setPhase] = useState<Phase>(RESUME ? 'dashboard' : 'upload')
+  const [dragging, setDragging] = useState(false)
   const [sources, setSources] = useState<NoteSource[]>([])
   const [addMode, setAddMode] = useState<InputMode>('file')
   const [linkDraft, setLinkDraft] = useState('')
   const [textDraft, setTextDraft] = useState('')
   const [progress, setProgress] = useState('')
   const [errors, setErrors] = useState<string[]>([])
-  const [products, setProducts] = useState<NoteProduct[]>([])
-  const [items, setItems] = useState<Item[]>([])
+  const [products, setProducts] = useState<NoteProduct[]>(RESUME?.products ?? [])
+  const [items, setItems] = useState<Item[]>(RESUME?.items ?? [])
   const [recomputing, setRecomputing] = useState(false)
-  const [windowMonths, setWindowMonths] = useState(12)
-  const [fileById, setFileById] = useState<Record<string, GenerateFile>>({})
+  const [loadingChartId, setLoadingChartId] = useState<string | null>(null)
+  const [windowMonths, setWindowMonths] = useState(RESUME?.windowMonths ?? 12)
+  const [fileById, setFileById] = useState<Record<string, GenerateFile>>(RESUME?.fileById ?? {})
   const [preview, setPreview] = useState<{ name: string; url: string; mediaType: string } | null>(null)
   const [printing, setPrinting] = useState(false)
   const [backendOk, setBackendOk] = useState<boolean | null>(null)
   const [savedSession, setSavedSession] = useState<{ prods: NoteProduct[]; wm: number } | null>(() => loadSession())
 
-  const [view, setView] = useState<'summary' | 'detail'>('summary')
+  const [view, setView] = useState<'summary' | 'detail'>(RESUME?.view ?? 'summary')
   const [profile, setProfile] = useState<ProfileKey>('balanced')
   const [custom, setCustom] = useState<ScoreWeights>(DEFAULT_CUSTOM_WEIGHTS)
   const [sortKey, setSortKey] = useState<SortKey>('rank')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(RESUME?.selectedId ?? null)
+  // Lifted so the factsheet button (in the detail toolbar) can carry it to the store.
+  const [notional, setNotional] = useState('')
 
-  const scored = useMemo(() => scoreProducts(items, weightsFor(profile, custom)), [items, profile, custom])
-  const selected = scored.find((s) => s.product.id === selectedId) ?? null
+  // Keep the resume snapshot current so navigating to the script/factsheet screens and
+  // back restores this exact view.
+  useEffect(() => {
+    if (phase === 'dashboard') RESUME = { products, items, windowMonths, fileById, selectedId, view }
+  }, [phase, products, items, windowMonths, fileById, selectedId, view])
+
+  // Only KIKO products get scored & ranked — that's what the desk actually sells.
+  // Everything else still gets extracted/backtested (graph + detail + factsheet/script),
+  // just listed without a rank.
+  const kikoItems = useMemo(() => items.filter((i) => i.product.structureType === 'kiko'), [items])
+  const otherItems = useMemo(() => items.filter((i) => i.product.structureType !== 'kiko'), [items])
+  const scored = useMemo(() => scoreProducts(kikoItems, weightsFor(profile, custom)), [kikoItems, profile, custom])
+  const selected: DetailProduct | null =
+    scored.find((s) => s.product.id === selectedId) ??
+    (() => {
+      const it = otherItems.find((i) => i.product.id === selectedId)
+      return it ? { ...it, score: null, rank: null } : null
+    })()
 
   useEffect(() => {
     fetch('http://localhost:8000/api/generate/health')
@@ -114,8 +203,8 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
 
   async function recompute(prods: NoteProduct[], wm: number) {
     setRecomputing(true)
-    // Price fetches are cached per symbol (api/prices.ts), so running products
-    // concurrently costs nothing extra and cuts wall-clock on large batches.
+    // Use the fast scoring pass — no candle data stored, so this completes much
+    // quicker on large batches. Charts load lazily when the user opens a detail page.
     const POOL = 3
     const next: (Item | null)[] = new Array(prods.length).fill(null)
     let started = 0
@@ -124,7 +213,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     async function worker() {
       while (started < prods.length) {
         const i = started++
-        next[i] = { product: prods[i], backtest: await backtest(prods[i], wm) }
+        next[i] = { product: prods[i], backtest: await backtestScore(prods[i], wm) }
         done++
         setProgress(`Backtest ${done}/${prods.length}`)
       }
@@ -134,11 +223,28 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     setRecomputing(false)
   }
 
+  // Lazy-load full candle data for one product the first time its detail page opens.
+  // backtestDetail reuses the already-cached prices from the scoring pass so there
+  // is no extra network cost — it's purely CPU work to build the series arrays.
+  async function loadDetail(id: string, wm: number) {
+    const item = items.find((it) => it.product.id === id)
+    if (!item || item.backtest.chartReady) return
+    setLoadingChartId(id)
+    try {
+      const detailed = await backtestDetail(item.product, wm)
+      setItems((prev) => prev.map((it) => it.product.id === id ? { ...it, backtest: detailed } : it))
+    } finally {
+      setLoadingChartId(null)
+    }
+  }
+
   async function run() {
     setPhase('running')
     setErrors([])
     const errs: string[] = []
-    const results: (NoteProduct | null)[] = new Array(sources.length).fill(null)
+    // One source can yield MANY products (a pasted desk listing → N products), so each
+    // slot holds an array that gets flattened afterwards.
+    const results: NoteProduct[][] = new Array(sources.length).fill(null).map(() => [])
     const nextFileById: Record<string, GenerateFile> = {}
 
     // Extract concurrently (small pool) — wall-clock is dominated by the model call,
@@ -151,10 +257,16 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
       while (started < sources.length) {
         const i = started++
         const source = sources[i]
-        const id = crypto.randomUUID()
         try {
-          results[i] = await extractNote(source, id)
-          if (source.kind === 'file') nextFileById[id] = source.file
+          if (source.kind === 'text') {
+            // Large desk listings are split into small chunks + extracted concurrently so a
+            // 30-product paste doesn't hit the 180s single-call timeout.
+            results[i] = await extractNotesFromTextChunked(source.text, source.label, () => crypto.randomUUID())
+          } else {
+            const id = crypto.randomUUID()
+            results[i] = [await extractNote(source, id)]
+            if (source.kind === 'file') nextFileById[id] = source.file
+          }
         } catch (err) {
           errs.push(err instanceof Error ? err.message : String(err))
         }
@@ -164,7 +276,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     }
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, sources.length) }, worker))
 
-    const prods = results.filter((p): p is NoteProduct => p !== null)
+    const prods = results.flat()
     setProducts(prods)
     setFileById(nextFileById)
     setErrors(errs)
@@ -202,6 +314,8 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   function addTextSource() {
     const text = textDraft.trim()
     if (!text) return
+    // One text source may hold many products — the model splits it at extraction time
+    // (extractNotesFromText), deciding the product count and underlyings itself.
     const n = sources.filter((s) => s.kind === 'text').length + 1
     setSources((prev) => [...prev, { kind: 'text', text, label: `ข้อความ #${n}` }])
     setTextDraft('')
@@ -224,11 +338,12 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     setPreview(null)
   }
 
-  async function handlePrintSelected() {
+  async function handleExportSelected(format: 'pdf' | 'jpg') {
     if (!selected) return
     setPrinting(true)
     try {
-      await printProductReport(selected, windowMonths)
+      if (format === 'pdf') await printProductReport(selected, windowMonths)
+      else await downloadProductJpg(selected, windowMonths)
     } finally {
       setPrinting(false)
     }
@@ -237,7 +352,11 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   function loadMockData() {
     setErrors([])
     setProgress('mock data loaded')
-    const loaded = MOCK_BACKTEST_BUNDLE.map((preset: { backtestProduct: NoteProduct; backtestResult: BacktestResult }) => ({ product: preset.backtestProduct, backtest: preset.backtestResult }))
+    // Mock results include full candle series, so chartReady = true — no lazy pass needed.
+    const loaded = MOCK_BACKTEST_BUNDLE.map((preset: { backtestProduct: NoteProduct; backtestResult: BacktestResult }) => ({
+      product: preset.backtestProduct,
+      backtest: { ...preset.backtestResult, chartReady: true },
+    }))
     setProducts(loaded.map((item: Item) => item.product))
     setItems(loaded)
     setSelectedId(loaded[0]?.product.id ?? null)
@@ -271,15 +390,21 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     return [...group].sort((a, b) => (sortDir === 'asc' ? val(a) - val(b) : val(b) - val(a)))
   }
 
-  // ── Upload / running ──
+  // ── Upload / running (landing) ──
   if (phase !== 'dashboard') {
+    const runningStage = phase === 'running' ? (progress.startsWith('Backtest') ? 2 : 1) : -1
     return (
-      <Screen maxWidth={640}>
-        <Card>
-          <div style={{ fontSize: 18, fontWeight: 700, color: C.navy, marginBottom: 4 }}>Backtest &amp; Rank — ตราสารโครงสร้าง</div>
-          <div style={{ fontSize: 13, color: C.muted, marginBottom: 18 }}>
-            อัปโหลด Term Sheet หลายไฟล์พร้อมกัน — ระบบจะสกัดข้อมูล → แบ็คเทสต์ราคาย้อนหลัง (worst-of) → ให้คะแนน → จัดอันดับ ให้อัตโนมัติ
+      <Screen maxWidth={680}>
+        {/* Hero */}
+        <div style={{ textAlign: 'center', margin: '10px 0 18px' }}>
+          <div style={{ fontSize: 24, fontWeight: 700, color: C.text, letterSpacing: '-0.01em' }}>Structured Note Summary</div>
+          <div style={{ fontSize: 13.5, color: C.muted, marginTop: 4, maxWidth: 480, marginLeft: 'auto', marginRight: 'auto', lineHeight: 1.7 }}>
+            รวม Term Sheet หลายรายการให้เป็นตารางสรุปเดียว — สกัดเงื่อนไข แบ็คเทสต์ราคาย้อนหลัง จัดอันดับ แล้วต่อยอดเป็น Script, Factsheet หรือกราฟได้ทันที
           </div>
+        </div>
+        <PipelineStrip stage={runningStage} />
+
+        <Card>
           {phase === 'upload' && (
             <>
               {backendOk === false && (
@@ -293,102 +418,102 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
                   <button className="btn-ghost" onClick={restoreSession} style={{ padding: '5px 14px', borderRadius: 8, border: `1px solid ${C.tealBorder}`, background: C.white, color: C.teal, fontSize: 12.5, cursor: 'pointer', flexShrink: 0 }}>กู้คืน →</button>
                 </div>
               )}
-              <div style={{ display: 'flex', gap: 16, marginBottom: 16, fontSize: 13, color: C.text }}>
-                <label style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <input type="radio" checked={dataSource === 'upload'} onChange={() => setDataSource('upload')} />
-                  อัปโหลดไฟล์จริง
-                </label>
-                <label style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <input type="radio" checked={dataSource === 'mock'} onChange={() => setDataSource('mock')} />
-                  ใช้ mock ตัวอย่าง
-                </label>
+
+              <IconOptions
+                value={addMode}
+                onChange={(v) => setAddMode(v as InputMode)}
+                minWidth={150}
+                options={[
+                  { value: 'file', icon: <IconFileText size={19} />, label: 'ไฟล์เอกสาร', sub: 'PDF / รูปภาพ' },
+                  { value: 'link', icon: <IconLink size={19} />, label: 'ลิงก์อ้างอิง', sub: 'Web URL' },
+                  { value: 'text', icon: <IconAlignLeft size={19} />, label: 'ข้อความสรุป', sub: 'วางจากอีเมล / แชท' },
+                ]}
+              />
+
+              <div style={{ marginTop: 12 }}>
+                {addMode === 'file' && (
+                  <label
+                    onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
+                    onDragLeave={() => setDragging(false)}
+                    onDrop={(e) => {
+                      e.preventDefault()
+                      setDragging(false)
+                      if (e.dataTransfer.files?.length) addFileSources(e.dataTransfer.files)
+                    }}
+                    style={{
+                      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 6,
+                      padding: '34px 20px', borderRadius: 12, cursor: 'pointer', textAlign: 'center',
+                      border: `1.5px dashed ${dragging ? C.primary : C.border}`,
+                      background: dragging ? C.primaryLight : C.bg,
+                      transition: 'border-color 0.15s ease, background-color 0.15s ease',
+                    }}
+                  >
+                    <span style={{ color: dragging ? C.primary : C.muted, display: 'flex' }}><IconUpload size={26} /></span>
+                    <span style={{ fontSize: 14, fontWeight: 500, color: C.text }}>ลากไฟล์มาวาง หรือคลิกเลือก</span>
+                    <span style={{ fontSize: 12, color: C.muted }}>PDF, PNG, JPG — เลือกได้หลายไฟล์พร้อมกัน</span>
+                    <input type="file" accept=".pdf,.png,.jpg,.jpeg,.webp" multiple style={{ display: 'none' }} onChange={(e) => { if (e.target.files?.length) addFileSources(e.target.files) }} />
+                  </label>
+                )}
+                {addMode === 'link' && (
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <input
+                      value={linkDraft}
+                      onChange={(e) => setLinkDraft(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') addLinkSource() }}
+                      placeholder="https://..."
+                      style={{ flex: 1, padding: '12px 14px', borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 14, boxSizing: 'border-box' }}
+                    />
+                    <button className="btn-ghost" onClick={addLinkSource} disabled={!linkDraft.trim()} style={{ padding: '0 16px', borderRadius: 10, border: `1px solid ${C.primaryBorder}`, background: C.primaryLight, color: C.primary, fontSize: 13.5, cursor: 'pointer' }}>+ เพิ่มลิงก์</button>
+                  </div>
+                )}
+                {addMode === 'text' && (
+                  <div>
+                    <textarea
+                      value={textDraft}
+                      onChange={(e) => setTextDraft(e.target.value)}
+                      placeholder="วางรายละเอียดผลิตภัณฑ์ — หนึ่งข้อความมีหลายผลิตภัณฑ์ได้ ระบบแยกให้เอง"
+                      rows={5}
+                      style={{ width: '100%', padding: '12px 14px', borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 14, boxSizing: 'border-box', resize: 'vertical', fontFamily: 'inherit', marginBottom: 8 }}
+                    />
+                    <NavBtn onClick={addTextSource} disabled={!textDraft.trim()} secondary>+ เพิ่มข้อความ</NavBtn>
+                  </div>
+                )}
               </div>
 
-              {dataSource === 'upload' ? (
-                <>
-                  <div style={{ fontSize: 13, color: C.muted, marginBottom: 10 }}>
-                    เพิ่มผลิตภัณฑ์ทีละรายการได้ 3 รูปแบบผสมกัน — ลิงก์อ้างอิง, ไฟล์เอกสารดิจิทัล (PDF/รูปภาพ), หรือข้อความสรุปโดยย่อ
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
-                    {([
-                      { key: 'link', label: 'ลิงก์อ้างอิง (Web Link)' },
-                      { key: 'file', label: 'ไฟล์เอกสารดิจิทัล (PDF/รูปภาพ)' },
-                      { key: 'text', label: 'ข้อมูลสรุปโดยย่อ' },
-                    ] as { key: InputMode; label: string }[]).map((t) => (
-                      <button
-                        key={t.key}
-                        onClick={() => setAddMode(t.key)}
-                        style={{
-                          padding: '8px 14px', borderRadius: 8, border: `1px solid ${addMode === t.key ? C.teal : C.border}`,
-                          background: addMode === t.key ? C.tealLight : C.white, color: addMode === t.key ? C.teal : C.muted,
-                          fontSize: 13.5, fontWeight: addMode === t.key ? 600 : 400, cursor: 'pointer',
-                        }}
-                      >
-                        {t.label}
-                      </button>
-                    ))}
-                  </div>
-
-                  {addMode === 'file' && (
-                    <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: 20, border: `1.5px dashed ${C.border}`, borderRadius: 10, cursor: 'pointer', color: C.muted, fontSize: 14 }}>
-                      เลือกไฟล์ Term Sheet — PDF ได้หลายไฟล์
-                      <input type="file" accept=".pdf,.png,.jpg,.jpeg,.webp" multiple style={{ display: 'none' }} onChange={(e) => { if (e.target.files?.length) addFileSources(e.target.files) }} />
-                    </label>
-                  )}
-                  {addMode === 'link' && (
-                    <div style={{ display: 'flex', gap: 8 }}>
-                      <input
-                        value={linkDraft}
-                        onChange={(e) => setLinkDraft(e.target.value)}
-                        placeholder="https://..."
-                        style={{ flex: 1, padding: '12px 14px', borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 14, boxSizing: 'border-box' }}
-                      />
-                      <button className="btn-ghost" onClick={addLinkSource} disabled={!linkDraft.trim()} style={{ padding: '0 16px', borderRadius: 10, border: `1px solid ${C.teal}`, background: C.tealLight, color: C.teal, fontSize: 13.5, cursor: 'pointer' }}>+ เพิ่มลิงก์</button>
-                    </div>
-                  )}
-                  {addMode === 'text' && (
-                    <div>
-                      <textarea
-                        value={textDraft}
-                        onChange={(e) => setTextDraft(e.target.value)}
-                        placeholder="กรุณาระบุข้อมูลรายละเอียดผลิตภัณฑ์ ณ ที่นี่"
-                        rows={5}
-                        style={{ width: '100%', padding: '12px 14px', borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 14, boxSizing: 'border-box', resize: 'vertical', fontFamily: 'inherit', marginBottom: 8 }}
-                      />
-                      <NavBtn onClick={addTextSource} disabled={!textDraft.trim()} secondary>+ เพิ่มข้อความ</NavBtn>
-                    </div>
-                  )}
-
-                  {sources.length > 0 && (
-                    <ul style={{ listStyle: 'none', padding: 0, margin: '16px 0', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      {sources.map((s, i) => (
-                        <li key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, fontSize: 13, color: C.teal, background: C.tealLight, border: `1px solid ${C.tealBorder}`, borderRadius: 8, padding: '8px 12px' }}>
-                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><span className="num" style={{ fontSize: 11, color: C.muted, marginRight: 6 }}>{SOURCE_LABEL[s.kind]}</span>{s.label}</span>
-                          <button className="btn-ghost" onClick={() => removeSource(i)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: C.muted, flexShrink: 0 }}>×</button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 20 }}>
-                    <NavBtn onClick={() => patch({ screen: 'landing' })} secondary>กลับ</NavBtn>
-                    <NavBtn onClick={run} disabled={sources.length === 0}>{sources.length ? `เริ่มวิเคราะห์ ${sources.length} รายการ →` : 'เพิ่มข้อมูลก่อน'}</NavBtn>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div style={{ fontSize: 13, color: C.muted, marginBottom: 12 }}>โหลดชุดตัวอย่าง (ไม่เรียกสกัดข้อมูลจริง) เพื่อดูหน้าตา dashboard</div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <NavBtn onClick={() => patch({ screen: 'landing' })} secondary>กลับ</NavBtn>
-                    <NavBtn onClick={loadMockData}>โหลด mock ชุดรวม →</NavBtn>
-                  </div>
-                </>
+              {sources.length > 0 && (
+                <ul style={{ listStyle: 'none', padding: 0, margin: '14px 0 0', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {sources.map((s, i) => (
+                    <li key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, fontSize: 13, color: C.text, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: '8px 12px' }}>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                        <span style={{ color: C.teal, display: 'flex', flexShrink: 0 }}><IconCheck size={13} strokeWidth={2.5} /></span>
+                        <span className="num" style={{ fontSize: 11, color: C.muted, flexShrink: 0 }}>{SOURCE_LABEL[s.kind]}</span>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.label}</span>
+                      </span>
+                      <button className="btn-ghost" onClick={() => removeSource(i)} aria-label={`ลบ ${s.label}`} style={{ border: 'none', background: 'none', cursor: 'pointer', color: C.muted, flexShrink: 0 }}>×</button>
+                    </li>
+                  ))}
+                </ul>
               )}
+
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginTop: 20 }}>
+                <button
+                  className="btn-ghost"
+                  onClick={loadMockData}
+                  title="โหลดชุดตัวอย่างเพื่อดูหน้าตา dashboard — ไม่เรียกสกัดข้อมูลจริง"
+                  style={{ padding: '8px 14px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.muted, fontSize: 12.5, cursor: 'pointer' }}
+                >
+                  ลองด้วยข้อมูลตัวอย่าง (demo)
+                </button>
+                <NavBtn onClick={run} disabled={sources.length === 0}>
+                  {sources.length ? `เริ่มวิเคราะห์ ${sources.length} รายการ →` : 'เพิ่มข้อมูลก่อน'}
+                </NavBtn>
+              </div>
             </>
           )}
           {phase === 'running' && (
-            <div style={{ padding: '20px 0', textAlign: 'center' }}>
-              <div className="spin" style={{ fontSize: 22, color: C.teal }}>◌</div>
-              <div style={{ fontSize: 13.5, color: C.text, marginTop: 10 }}>{progress}</div>
+            <div style={{ padding: '26px 0', textAlign: 'center' }}>
+              <div className="spin" style={{ fontSize: 22, color: C.primary }}>◌</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: C.text, marginTop: 10 }}>{progress}</div>
               <div style={{ fontSize: 12, color: C.muted, marginTop: 6 }}>ใช้ Claude Code สกัดข้อมูลจากแต่ละไฟล์ (อาจใช้เวลาสักครู่ต่อไฟล์)</div>
             </div>
           )}
@@ -412,8 +537,8 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   function renderTable(group: ScoredProduct[], accent: string) {
     if (group.length === 0) return <div style={{ fontSize: 13, color: C.muted, padding: '8px 12px' }}>— ไม่มีรายการ —</div>
     return (
-      <div style={{ overflowX: 'auto' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+      <div className="table-wrap">
+        <table>
           <thead>
             <tr>
               {sortableTh('Rank', 'rank')}
@@ -431,7 +556,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
           </thead>
           <tbody>
             {group.map((s) => (
-              <tr key={s.product.id}>
+              <tr key={s.product.id} className="row-hover">
                 <td style={td}><span className={`rank-chip${s.rank <= 3 ? ' top' : ''}`}>{String(s.rank).padStart(2, '0')}</span></td>
                 <td style={{ ...td, fontWeight: 600 }}>{s.product.productCode ?? s.product.sourceFile}</td>
                 <td style={td}>
@@ -455,7 +580,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
                 <td style={td}>{s.product.issuer ?? '-'}</td>
                 <td className="num" style={{ ...td, fontWeight: 600 }}>{s.score}</td>
                 <td style={{ ...td, display: 'flex', gap: 6 }}>
-                  <button className="btn-ghost" onClick={() => viewDetail(s.product.id)} style={{ padding: '5px 12px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.teal, fontSize: 12.5, cursor: 'pointer' }}>ดูรายละเอียด →</button>
+                  <button className="btn-ghost" onClick={() => viewDetail(s.product.id)} style={{ padding: '5px 12px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.primary, fontSize: 12.5, cursor: 'pointer' }}>ดูรายละเอียด →</button>
                   {fileById[s.product.id] && (
                     <button className="btn-ghost" onClick={() => openPreview(s.product.id)} style={{ padding: '5px 12px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.muted, fontSize: 12.5, cursor: 'pointer' }}>ต้นฉบับ</button>
                   )}
@@ -472,6 +597,19 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     setSelectedId(id)
     setView('detail')
     window.scrollTo({ top: 0 })
+    // Kick off the lazy candle fetch if this product hasn't been opened before.
+    loadDetail(id, windowMonths)
+  }
+
+  function startNewBatch() {
+    RESUME = null
+    setPhase('upload')
+    setItems([])
+    setProducts([])
+    setSources([])
+    setFileById({})
+    setSelectedId(null)
+    setView('summary')
   }
 
   const bestPass = passGroup.length ? passGroup.reduce((a, b) => (b.score > a.score ? b : a)) : null
@@ -482,9 +620,48 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
         <Card>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 18 }}>
             <button className="btn-ghost" onClick={() => setView('summary')} style={{ padding: '7px 14px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.text, fontSize: 12.5, cursor: 'pointer' }}>← กลับตารางสรุป</button>
-            <NavBtn onClick={handlePrintSelected} disabled={printing || !selected}>{printing ? 'กำลังสร้าง PDF...' : 'ดาวน์โหลด PDF ตะกร้านี้'}</NavBtn>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {/* Continue into memie's generators with this product's extracted data. */}
+              <button
+                className="btn-ghost"
+                disabled={!selected}
+                onClick={() => {
+                  if (!selected) return
+                  const p = selected.product
+                  patch({ selectedProduct: p, retrieved: toRetrieved(p), targetProduct: p.productCode ?? p.sourceFile, screen: 'persona' })
+                }}
+                style={{ padding: '9px 14px', borderRadius: 8, border: `1px solid ${C.primaryBorder}`, background: C.primaryLight, color: C.primary, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}
+              >
+                🎯 สร้าง Script
+              </button>
+              <button
+                className="btn-ghost"
+                disabled={!selected}
+                onClick={() => {
+                  if (!selected) return
+                  const n = Number(notional.replace(/,/g, ''))
+                  patch({ selectedProduct: selected.product, notional: notional.trim() && Number.isFinite(n) && n > 0 ? n : null, screen: 'factsheet' })
+                }}
+                style={{ padding: '9px 14px', borderRadius: 8, border: `1px solid ${C.primaryBorder}`, background: C.primaryLight, color: C.primary, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}
+              >
+                📄 สร้าง Factsheet
+              </button>
+              <select
+                value=""
+                disabled={printing || !selected}
+                onChange={(e) => {
+                  const format = e.target.value as 'pdf' | 'jpg'
+                  if (format) handleExportSelected(format)
+                }}
+                style={{ padding: '9px 14px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.text, color: C.white, fontSize: 13, fontWeight: 600, cursor: printing || !selected ? 'default' : 'pointer' }}
+              >
+                <option value="" disabled>{printing ? 'กำลังสร้างไฟล์...' : 'ดาวน์โหลดตะกร้านี้'}</option>
+                <option value="pdf">บันทึกเป็น PDF</option>
+                <option value="jpg">บันทึกเป็น JPG (ส่งไลน์)</option>
+              </select>
+            </div>
           </div>
-          <DetailGraphView key={selected?.product.id ?? 'none'} selected={selected} hasFile={!!(selected && fileById[selected.product.id])} onPreview={() => selected && openPreview(selected.product.id)} />
+          <DetailGraphView key={selected?.product.id ?? 'none'} selected={selected} hasFile={!!(selected && fileById[selected.product.id])} onPreview={() => selected && openPreview(selected.product.id)} notional={notional} setNotional={setNotional} isLoadingChart={loadingChartId === selected?.product.id} />
         </Card>
 
         {preview && (
@@ -517,14 +694,25 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
       <Card>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12 }}>
           <div>
-            <div className="overline">Backtest &amp; Rank</div>
-            <div style={{ fontSize: 20, fontWeight: 700, color: C.text, letterSpacing: '-0.01em' }}>KIKO Product Summary</div>
+            <div className="overline">Structured Note Summary</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: C.text, letterSpacing: '-0.01em' }}>สรุปและจัดอันดับตราสารโครงสร้าง</div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <select value={windowMonths} onChange={(e) => changeWindow(Number(e.target.value))} disabled={recomputing} style={{ padding: '7px 10px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, fontSize: 12.5 }}>
               {WINDOW_OPTIONS.map((o) => <option key={o.months} value={o.months}>ย้อนหลัง {o.label}</option>)}
             </select>
             <button className="btn-ghost" onClick={() => exportCsv(scored)} style={{ padding: '7px 14px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.text, fontSize: 12.5, cursor: 'pointer' }}>CSV</button>
+            <button
+              className="btn-ghost"
+              onClick={startNewBatch}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 14px', borderRadius: 8,
+                border: `1px solid ${C.primaryBorder}`, background: C.primaryLight, color: C.primary,
+                fontSize: 12.5, fontWeight: 600, cursor: 'pointer',
+              }}
+            >
+              <IconUpload size={13} />วิเคราะห์ชุดใหม่
+            </button>
           </div>
         </div>
         {recomputing && <div style={{ fontSize: 12.5, color: C.teal, marginTop: 6 }}>กำลังคำนวณใหม่...</div>}
@@ -533,15 +721,15 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
           <div className="tile">
             <div className="k">ผลิตภัณฑ์</div>
             <div className="v">{items.length}</div>
-            <div className="s">แบ็คเทสต์ {windowMonths} เดือน · worst-of</div>
+            <div className="s">KIKO {kikoItems.length} · อื่นๆ {otherItems.length} · แบ็คเทสต์ {windowMonths} เดือน</div>
           </div>
           <div className="tile">
-            <div className="k">Historical Pass</div>
+            <div className="k">Historical Pass (KIKO)</div>
             <div className="v" style={{ color: 'var(--c-teal)' }}>{passGroup.length}</div>
             <div className="s">ไม่เคยชน KI/KO</div>
           </div>
           <div className="tile">
-            <div className="k">Historical Knocked</div>
+            <div className="k">Historical Knocked (KIKO)</div>
             <div className="v" style={{ color: 'var(--c-coral)' }}>{knockedGroup.length}</div>
             <div className="s">เคยชน KI/KO ในช่วงที่ดู</div>
           </div>
@@ -557,7 +745,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
           {(['aggressive', 'balanced', 'save', 'custom'] as ProfileKey[]).map((p) => {
             const sel = profile === p
             return (
-              <button key={p} className="btn-ghost" aria-pressed={sel} onClick={() => setProfile(p)} style={{ padding: '6px 13px', borderRadius: 999, fontSize: 12.5, cursor: 'pointer', border: `1px solid ${sel ? C.teal : C.border}`, background: sel ? C.tealLight : C.white, color: sel ? C.teal : C.text, fontWeight: sel ? 600 : 400 }}>
+              <button key={p} className="btn-ghost" aria-pressed={sel} onClick={() => setProfile(p)} style={{ padding: '6px 13px', borderRadius: 999, fontSize: 12.5, cursor: 'pointer', border: `1px solid ${sel ? C.primary : C.border}`, background: sel ? C.primary : C.white, color: sel ? C.onPrimary : C.text, fontWeight: sel ? 600 : 400 }}>
                 {PROFILE_LABELS[p]}
               </button>
             )
@@ -580,7 +768,11 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
           </div>
         )}
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '14px 0 8px' }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, margin: '18px 0 4px' }}>
+          <span style={{ fontSize: 16, fontWeight: 700, color: C.text }}>KIKO Ranking</span>
+          <span style={{ fontSize: 12.5, color: C.muted }}>{kikoItems.length} รายการ — จัดอันดับตามโปรไฟล์คะแนนที่เลือก</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '10px 0 8px' }}>
           <span className="badge pass">Historical Pass</span>
           <span style={{ fontSize: 12.5, color: C.muted }}>{passGroup.length} รายการ — ไม่เคยชน KI/KO</span>
         </div>
@@ -596,10 +788,58 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
         </div>
       </Card>
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 20 }}>
-        <NavBtn onClick={() => { setPhase('upload'); setItems([]); setProducts([]); setSources([]); setFileById({}); setSelectedId(null); setView('summary') }} secondary>วิเคราะห์ชุดใหม่</NavBtn>
-        <NavBtn onClick={() => patch({ screen: 'landing' })} secondary>กลับหน้าแรก</NavBtn>
-      </div>
+      {otherItems.length > 0 && (
+        <Card style={{ marginTop: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 4 }}>
+            <span style={{ fontSize: 16, fontWeight: 700, color: C.text }}>ผลิตภัณฑ์อื่น</span>
+            <span className="badge plain">ไม่จัดอันดับ</span>
+          </div>
+          <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 12 }}>
+            {otherItems.length} รายการ — ไม่ใช่ KIKO จึงไม่เข้าตารางคะแนน แต่ดูรายละเอียด/กราฟ/สร้างเอกสารได้
+          </div>
+          <div className="table-wrap">
+            <table>
+                <thead>
+                  <tr>
+                    <th style={th}>ประเภท</th>
+                    <th style={th}>Product</th>
+                    <th style={th}>Underlying</th>
+                    <th style={th}>Coupon</th>
+                    <th style={th}>KI / KO</th>
+                    <th style={th}>Buffer</th>
+                    <th style={th}>Vol</th>
+                    <th style={th}>Tenor</th>
+                    <th style={th}>Issuer</th>
+                    <th style={th}>ผลย้อนหลัง</th>
+                    <th style={th}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {otherItems.map((it) => (
+                    <tr key={it.product.id} className="row-hover">
+                      <td style={td}><span className="badge plain">{STRUCTURE_TYPE_LABELS[it.product.structureType]}</span></td>
+                      <td style={{ ...td, fontWeight: 600 }}>{it.product.productCode ?? it.product.sourceFile}</td>
+                      <td style={td}>{it.product.underlyings.join(', ') || '-'}</td>
+                      <td className="num" style={td}>{fmtPct(it.product.couponPa)}</td>
+                      <td className="num" style={td}>{kiko(it.product)}</td>
+                      <td className="num" style={td}>{it.backtest.bufferPct == null ? '-' : `${it.backtest.bufferPct}%`}</td>
+                      <td className="num" style={td}>{it.backtest.volatilityPct == null ? '-' : `${it.backtest.volatilityPct}%`}</td>
+                      <td className="num" style={td}>{it.product.tenor ?? '-'}</td>
+                      <td style={td}>{it.product.issuer ?? '-'}</td>
+                      <td style={td}><span className={`badge ${it.backtest.verdict === 'pass' ? 'pass' : 'knock'}`}>{it.backtest.verdict === 'pass' ? 'Pass' : 'Knocked'}</span></td>
+                      <td style={{ ...td, display: 'flex', gap: 6 }}>
+                        <button className="btn-ghost" onClick={() => viewDetail(it.product.id)} style={{ padding: '5px 12px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.primary, fontSize: 12.5, cursor: 'pointer' }}>ดูรายละเอียด →</button>
+                        {fileById[it.product.id] && (
+                          <button className="btn-ghost" onClick={() => openPreview(it.product.id)} style={{ padding: '5px 12px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.muted, fontSize: 12.5, cursor: 'pointer' }}>ต้นฉบับ</button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
 
       {preview && (
         <div onClick={closePreview} style={{ position: 'fixed', inset: 0, background: 'var(--c-overlay)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
@@ -625,7 +865,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   )
 }
 
-function DetailGraphView({ selected, hasFile, onPreview }: { selected: ScoredProduct | null; hasFile: boolean; onPreview: () => void }) {
+function DetailGraphView({ selected, hasFile, onPreview, notional, setNotional, isLoadingChart }: { selected: DetailProduct | null; hasFile: boolean; onPreview: () => void; notional: string; setNotional: (v: string) => void; isLoadingChart: boolean }) {
   if (!selected) {
     return (
       <div style={{ textAlign: 'center', padding: '36px 0', color: C.muted }}>
@@ -637,7 +877,6 @@ function DetailGraphView({ selected, hasFile, onPreview }: { selected: ScoredPro
   const p = selected.product
   const bt = selected.backtest
   const koTimes = koTimesFor(p)
-  const [notional, setNotional] = useState('')
   const [showEma50, setShowEma50] = useState(false)
   const [showEma200, setShowEma200] = useState(false)
   const notionalNum = Number(notional.replace(/,/g, ''))
@@ -658,7 +897,7 @@ function DetailGraphView({ selected, hasFile, onPreview }: { selected: ScoredPro
     </div>
   )
 
-  const ulTh = { padding: '9px 10px', fontSize: 11.5, fontWeight: 700, color: C.white, textAlign: 'left' as const, whiteSpace: 'nowrap' as const, background: C.teal }
+  const ulTh = { padding: '9px 10px', fontSize: 11.5, fontWeight: 700, color: C.onPrimary, textAlign: 'left' as const, whiteSpace: 'nowrap' as const, background: C.primary }
   const ulTd = { padding: '9px 10px', fontSize: 13, color: C.text, whiteSpace: 'nowrap' as const }
 
   return (
@@ -672,7 +911,7 @@ function DetailGraphView({ selected, hasFile, onPreview }: { selected: ScoredPro
             <span className={`badge ${bt.verdict === 'pass' ? 'pass' : 'knock'}`}>
               {bt.verdict === 'pass' ? 'Historical Pass' : `Knocked${bt.knockedIn ? ' · KI' : ''}${bt.knockedOut ? ' · KO' : ''}`}
             </span>
-            <span className="badge plain">{p.structureType}</span>
+            <span className="badge plain">{STRUCTURE_TYPE_LABELS[p.structureType]}</span>
             {p.koType && <span className="badge plain">{p.koType === 'memory' ? 'KO: Memory' : 'KO: Final Valuation'}</span>}
             <span className="badge plain">{p.market === 'thai' ? 'หุ้นไทย' : 'ต่างประเทศ'}</span>
             {hasFile && (
@@ -680,11 +919,13 @@ function DetailGraphView({ selected, hasFile, onPreview }: { selected: ScoredPro
             )}
           </div>
         </div>
-        <div style={{ textAlign: 'center', padding: '12px 22px', borderRadius: 10, border: `1px solid ${C.tealBorder}`, background: C.tealLight, alignSelf: 'flex-start' }}>
-          <div className="overline" style={{ color: C.teal }}>คะแนนรวม</div>
-          <div className="num" style={{ fontSize: 34, fontWeight: 600, color: C.teal, lineHeight: 1.15 }}>{selected.score}</div>
-          <div style={{ fontSize: 12, color: C.muted }}>อันดับ {selected.rank}</div>
-        </div>
+        {selected.score != null && (
+          <div style={{ textAlign: 'center', padding: '12px 22px', borderRadius: 10, border: `1px solid ${C.tealBorder}`, background: C.tealLight, alignSelf: 'flex-start' }}>
+            <div className="overline" style={{ color: C.teal }}>คะแนนรวม</div>
+            <div className="num" style={{ fontSize: 34, fontWeight: 600, color: C.teal, lineHeight: 1.15 }}>{selected.score}</div>
+            <div style={{ fontSize: 12, color: C.muted }}>อันดับ {selected.rank}</div>
+          </div>
+        )}
       </div>
 
       {/* Key metrics strip */}
@@ -735,7 +976,7 @@ function DetailGraphView({ selected, hasFile, onPreview }: { selected: ScoredPro
           onChange={(e) => setNotional(e.target.value)}
           style={{ padding: '5px 10px', borderRadius: 8, border: `1px solid ${C.border}`, fontSize: 13, width: 150 }}
         />
-        <span style={{ color: C.muted, fontSize: 12 }}>ใช้คำนวณคอลัมน์ "จำนวนหุ้นที่ต้องส่งมอบ" เท่านั้น ไม่กระทบการแบ็คเทสต์</span>
+        <span style={{ color: C.muted, fontSize: 12 }}>ใช้คำนวณ "จำนวนหุ้นที่ต้องส่งมอบ" และมูลค่าจองซื้อ/ดอกเบี้ยสุทธิใน Factsheet — ไม่กระทบการแบ็คเทสต์</span>
       </div>
       <div style={{ overflowX: 'auto', marginBottom: 8, border: `1px solid ${C.border}`, borderRadius: 10 }}>
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -768,7 +1009,7 @@ function DetailGraphView({ selected, hasFile, onPreview }: { selected: ScoredPro
                   <td className="num" style={ulTd}>{fmtPct(p.kiPct)}</td>
                   <td className="num" style={ulTd}>{s.kiLevel?.toFixed(2) ?? '-'}</td>
                   <td className="num" style={ulTd}>{fmtPct(p.couponPa)}</td>
-                  <td className="num" style={{ ...ulTd, fontWeight: 700, color: C.teal }}>{shares == null ? '-' : shares.toLocaleString('en-US')}</td>
+                  <td className="num" style={{ ...ulTd, fontWeight: 700, color: C.primary }}>{shares == null ? '-' : shares.toLocaleString('en-US')}</td>
                 </tr>
               )
             })}
@@ -805,6 +1046,15 @@ function DetailGraphView({ selected, hasFile, onPreview }: { selected: ScoredPro
       {/* Graphs */}
       {bt.error ? (
         <div style={{ fontSize: 13.5, color: C.amber, marginTop: 14 }}>โหลดกราฟไม่ได้: {bt.error}</div>
+      ) : isLoadingChart ? (
+        // Chart data is loading lazily — show a placeholder until candles arrive.
+        <div style={{ marginTop: 18 }}>
+          <div className="section-h"><span className="overline">กราฟราคาย้อนหลัง {bt.windowMonths} เดือน</span></div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, padding: '48px 0', border: `1px solid ${C.border}`, borderRadius: 10, color: C.muted, fontSize: 13.5 }}>
+            <span className="spin" style={{ fontSize: 20, color: C.primary }}>◌</span>
+            กำลังโหลดกราฟ...
+          </div>
+        </div>
       ) : (
         <div>
           <div className="section-h"><span className="overline">กราฟราคาย้อนหลัง {bt.windowMonths} เดือน</span></div>

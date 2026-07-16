@@ -93,8 +93,9 @@ function buildSeries(product: NoteProduct, symbol: string, candles: Candle[], ch
 
 // When the doc gives no explicit KO observation dates but does state a cadence (e.g. "Monthly
 // Observe"), synthesize an approximate schedule from the fixing date + tenor instead of silently
-// skipping the KO check entirely.
-function deriveObservationDates(fixingDate: string | null, tenorMonths: number | null, frequency: 'daily' | 'monthly' | 'quarterly' | null): string[] {
+// skipping the KO check entirely. Exported so chartData.ts's koTimesFor (live chart + PDF/JPG
+// export) draws the same synthesized marks the backtest itself checks against.
+export function deriveObservationDates(fixingDate: string | null, tenorMonths: number | null, frequency: 'daily' | 'monthly' | 'quarterly' | null): string[] {
   if (!fixingDate || !tenorMonths || frequency == null || frequency === 'daily') return []
   const stepMonths = frequency === 'monthly' ? 1 : 3
   const start = new Date(fixingDate + 'T00:00:00Z')
@@ -138,7 +139,12 @@ function checkKnockOutContinuous(series: UnderlyingSeries[], checkFromTime: numb
   }))
 }
 
-export async function backtest(product: NoteProduct, windowMonths = 12): Promise<BacktestResult> {
+// ── Fast scoring pass ─────────────────────────────────────────────────────────
+// Fetches prices for every underlying, computes verdict / buffer% / vol%, but
+// stores EMPTY candles[] in each series so we don't pay the memory / rendering
+// cost for products the user never opens in detail. chartReady = false signals
+// the dashboard to call backtestDetail() when the user opens that product.
+export async function backtestScore(product: NoteProduct, windowMonths = 12): Promise<BacktestResult> {
   const warnings: string[] = []
   if (product.initialPrices.length > 0 && product.initialPrices.length !== product.underlyings.length) {
     warnings.push(`ราคาเริ่มต้นในเอกสาร (${product.initialPrices.length} ค่า) ไม่ตรงกับจำนวนหุ้นอ้างอิง (${product.underlyings.length} ตัว) — ระบบไม่ใช้ค่าดังกล่าว และใช้ราคาปิด ณ วัน fixing แทน`)
@@ -146,7 +152,7 @@ export async function backtest(product: NoteProduct, windowMonths = 12): Promise
   if (!product.fixingDate && product.initialPrices.length === 0) {
     warnings.push('เอกสารไม่ระบุวัน fixing และราคาเริ่มต้น — ระดับ Strike/KI/KO คำนวณจากแท่งแรกของข้อมูลที่ดึงได้ อาจคลาดเคลื่อน')
   }
-  const base = { windowMonths, series: [] as UnderlyingSeries[], warnings }
+  const base = { windowMonths, series: [] as UnderlyingSeries[], warnings, chartReady: false }
   if (product.underlyings.length === 0) {
     return { ...base, verdict: 'pass', knockedIn: false, knockedOut: false, bufferPct: null, volatilityPct: null, error: 'ไม่พบหุ้นอ้างอิงในเอกสาร' }
   }
@@ -161,9 +167,86 @@ export async function backtest(product: NoteProduct, windowMonths = 12): Promise
       perSymbolCandles.set(sym, candles)
       lastTime = Math.max(lastTime, candles[candles.length - 1].time)
     }
-    // Stated initial prices pair with underlyings BY INDEX — a count mismatch means the
-    // pairing is unreliable (silently wrong Strike/KI/KO levels), so discard them entirely
-    // and fall back to the fixing-date close instead.
+    const statedOk = product.initialPrices.length === product.underlyings.length
+    const checkFromTime = windowStart(lastTime, windowMonths)
+    product.underlyings.forEach((sym, i) => {
+      const allCandles = perSymbolCandles.get(sym)!
+      // Build a lightweight series: same levels/flags, but candles[] is EMPTY.
+      // The detail pass (backtestDetail) will populate it on demand.
+      const full = buildSeries(product, sym, allCandles, checkFromTime, statedOk ? product.initialPrices[i] : null)
+      series.push({ ...full, candles: [] })
+    })
+  } catch (err) {
+    return { ...base, series, verdict: 'pass', knockedIn: false, knockedOut: false, bufferPct: null, volatilityPct: null, error: err instanceof Error ? err.message : String(err) }
+  }
+
+  // For scoring purposes we need the real flags — re-derive them from a temporary
+  // full-candles series (never stored, just used for the verdict calculation).
+  const statedOk = product.initialPrices.length === product.underlyings.length
+  const checkFromTime = windowStart(lastTime, windowMonths)
+  const fullSeries: UnderlyingSeries[] = []
+  for (const sym of product.underlyings) {
+    // fetchDailyCloses is cached — this is a free map lookup, not a network call.
+    const candles = await fetchDailyCloses(sym, product.market)
+    const idx = product.underlyings.indexOf(sym)
+    fullSeries.push(buildSeries(product, sym, candles, checkFromTime, statedOk ? product.initialPrices[idx] : null))
+  }
+
+  const knockedIn = fullSeries.some((s) => s.knockedIn)
+  const knockedOut = product.koObservationFrequency === 'daily'
+    ? checkKnockOutContinuous(fullSeries, checkFromTime, lastTime)
+    : checkKnockOut(product, fullSeries, lastTime, checkFromTime)
+
+  let bufferPct: number | null = null
+  if (product.kiPct != null) {
+    const buffers = fullSeries
+      .filter((s) => s.initialPrice != null && s.currentPrice != null)
+      .map((s) => (s.currentPrice! / s.initialPrice!) * 100 - product.kiPct!)
+    bufferPct = buffers.length ? Math.round(Math.min(...buffers)) : null
+  }
+
+  const vols = fullSeries.map((s) => annualisedVol(s.candles.map((c) => c.close))).filter((v): v is number => v != null)
+  const volatilityPct = vols.length ? Math.round(Math.max(...vols)) : null
+
+  return {
+    ...base,
+    series, // empty candles[], levels/flags populated
+    verdict: knockedIn || knockedOut ? 'knocked' : 'pass',
+    knockedIn,
+    knockedOut,
+    bufferPct,
+    volatilityPct,
+    error: null,
+  }
+}
+
+// ── Full detail pass ───────────────────────────────────────────────────────────
+// Called only when the user opens a specific product's detail page. Populates
+// series[].candles for the chart. The price API cache means this costs no extra
+// network round-trip for products already scored above — it's just CPU work.
+export async function backtestDetail(product: NoteProduct, windowMonths = 12): Promise<BacktestResult> {
+  const warnings: string[] = []
+  if (product.initialPrices.length > 0 && product.initialPrices.length !== product.underlyings.length) {
+    warnings.push(`ราคาเริ่มต้นในเอกสาร (${product.initialPrices.length} ค่า) ไม่ตรงกับจำนวนหุ้นอ้างอิง (${product.underlyings.length} ตัว) — ระบบไม่ใช้ค่าดังกล่าว และใช้ราคาปิด ณ วัน fixing แทน`)
+  }
+  if (!product.fixingDate && product.initialPrices.length === 0) {
+    warnings.push('เอกสารไม่ระบุวัน fixing และราคาเริ่มต้น — ระดับ Strike/KI/KO คำนวณจากแท่งแรกของข้อมูลที่ดึงได้ อาจคลาดเคลื่อน')
+  }
+  const base = { windowMonths, series: [] as UnderlyingSeries[], warnings, chartReady: true }
+  if (product.underlyings.length === 0) {
+    return { ...base, verdict: 'pass', knockedIn: false, knockedOut: false, bufferPct: null, volatilityPct: null, error: 'ไม่พบหุ้นอ้างอิงในเอกสาร' }
+  }
+
+  const series: UnderlyingSeries[] = []
+  let lastTime = 0
+  try {
+    const perSymbolCandles = new Map<string, Candle[]>()
+    for (const sym of product.underlyings) {
+      const candles = await fetchDailyCloses(sym, product.market)
+      if (candles.length === 0) throw new Error(`ไม่มีข้อมูลราคา ${sym}`)
+      perSymbolCandles.set(sym, candles)
+      lastTime = Math.max(lastTime, candles[candles.length - 1].time)
+    }
     const statedOk = product.initialPrices.length === product.underlyings.length
     const checkFromTime = windowStart(lastTime, windowMonths)
     product.underlyings.forEach((sym, i) => {
@@ -174,12 +257,11 @@ export async function backtest(product: NoteProduct, windowMonths = 12): Promise
   }
 
   const checkFromTime = windowStart(lastTime, windowMonths)
-  const knockedIn = series.some((s) => s.knockedIn) // worst-of
+  const knockedIn = series.some((s) => s.knockedIn)
   const knockedOut = product.koObservationFrequency === 'daily'
     ? checkKnockOutContinuous(series, checkFromTime, lastTime)
     : checkKnockOut(product, series, lastTime, checkFromTime)
 
-  // Worst-of buffer: how many % the weakest underlying currently sits above its KI level.
   let bufferPct: number | null = null
   if (product.kiPct != null) {
     const buffers = series
@@ -188,7 +270,6 @@ export async function backtest(product: NoteProduct, windowMonths = 12): Promise
     bufferPct = buffers.length ? Math.round(Math.min(...buffers)) : null
   }
 
-  // Worst-of volatility: the highest annualised vol among underlyings, over the same window.
   const vols = series.map((s) => annualisedVol(s.candles.map((c) => c.close))).filter((v): v is number => v != null)
   const volatilityPct = vols.length ? Math.round(Math.max(...vols)) : null
 
@@ -203,3 +284,4 @@ export async function backtest(product: NoteProduct, windowMonths = 12): Promise
     error: null,
   }
 }
+

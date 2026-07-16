@@ -23,7 +23,35 @@ interface Props {
 }
 
 const CHART_HEIGHT = 600
-const DAY = 86400
+export const DAY = 86400
+// Fixed history window (not a % of each ticker's own span) so bar width/scale looks
+// the same across every chart instead of shrinking on tickers with longer history.
+export const DEFAULT_HISTORY_DAYS = 500
+
+// Snap a mark's real date to the nearest axis time (a candle or whitespace point).
+// lightweight-charts' timeToCoordinate returns null for any time that isn't an exact
+// data point, so both the live chart and the PDF/JPG export must snap first or the
+// mark line silently fails to draw. Drops marks that fall > 3 days from any axis
+// point (e.g. an observation date older than the fetched history) instead of piling
+// them onto candle #1.
+export function nearestAxisTime(target: number, axisTimes: number[]): number | null {
+  let nearest: number | null = null
+  for (const t of axisTimes) {
+    if (nearest == null || Math.abs(t - target) < Math.abs(nearest - target)) nearest = t
+  }
+  if (nearest != null && Math.abs(nearest - target) > DAY * 3) return null
+  return nearest
+}
+
+// Same default view for the live chart and the PDF/JPG export renderer: last
+// DEFAULT_HISTORY_DAYS of real candles, extended right past the furthest mark.
+export function defaultVisibleRange(times: number[], candles: Candle[]): { from: number; to: number } | null {
+  const firstTime = times[0]
+  const lastTime = times[times.length - 1]
+  const lastCandleTime = candles[candles.length - 1]?.time
+  if (firstTime == null || lastTime == null || lastCandleTime == null || lastTime <= firstTime) return null
+  return { from: Math.max(firstTime, lastCandleTime - DAY * DEFAULT_HISTORY_DAYS), to: lastTime + DAY * 12 }
+}
 const EMA50_COLOR = '#F2A950'
 const EMA200_COLOR = '#7B6CE0'
 
@@ -46,13 +74,19 @@ function computeEma(candles: Candle[], period: number): { time: number; value: n
 // Build the series data + axis times. Date marks that fall beyond the fetched price
 // history (future KO observation dates) get whitespace points appended, so the axis
 // extends to fit them and each mark lands on an exact axis time.
-function buildData(candles: Candle[], marks: DateMark[]): { data: unknown[]; times: number[] } {
+// Exported so the PDF/JPG export renderer builds the exact same axis (whitespace +
+// default zoom) as the live chart instead of a plain fitContent() with marks missing.
+export function buildData(candles: Candle[], marks: DateMark[]): { data: unknown[]; times: number[] } {
   const data: unknown[] = candles.map((c) => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }))
   const times: number[] = candles.map((c) => c.time)
   const last = times[times.length - 1]
   if (last != null) {
-    const future = [...new Set(marks.map((m) => m.time).filter((t) => t > last))].sort((a, b) => a - b)
-    for (const t of future) {
+    const maxMarkTime = Math.max(last, ...marks.map((m) => m.time))
+    // lightweight-charts spaces bars by INDEX, not by elapsed time — appending only one
+    // whitespace point per future mark (old behaviour) squashed month-apart KO observation
+    // dates onto adjacent bar slots. Filling every calendar day out to the furthest mark
+    // makes each day one index step, so the real time gaps read correctly on the axis.
+    for (let t = last + DAY; t <= maxMarkTime; t += DAY) {
       data.push({ time: t }) // whitespace — extends the axis without drawing a bar
       times.push(t)
     }
@@ -152,18 +186,6 @@ export function CandleChart({ candles, levels, dateMarks, showEma50 = false, sho
   dateMarksRef.current = dateMarks
   const axisTimesRef = useRef<number[]>([])
 
-  function nearestAxisTime(target: number): number | null {
-    let nearest: number | null = null
-    for (const t of axisTimesRef.current) {
-      if (nearest == null || Math.abs(t - target) < Math.abs(nearest - target)) nearest = t
-    }
-    // A mark whose real date falls well before the fetched price history even starts (e.g. an
-    // observation date older than the available candles) would otherwise snap onto candle #1 —
-    // piling multiple unrelated dates' labels on top of each other. Drop it instead of mis-placing it.
-    if (nearest != null && Math.abs(nearest - target) > DAY * 3) return null
-    return nearest
-  }
-
   // Position mark lines by writing styles directly to the DOM (no React state):
   // pan/zoom events fire per frame, and a setState round-trip lags a frame behind
   // the canvas — the lines would visibly float off the candles while dragging.
@@ -177,7 +199,7 @@ export function CandleChart({ candles, levels, dateMarks, showEma50 = false, sho
     for (const mark of dateMarksRef.current) {
       const el = markElsRef.current[mark.id]
       if (!el) continue
-      const snapped = nearestAxisTime(mark.time)
+      const snapped = nearestAxisTime(mark.time, axisTimesRef.current)
       const x = snapped == null ? null : timeScale.timeToCoordinate(snapped as never)
       if (x == null || x < 0 || x > paneWidth) {
         el.style.display = 'none'
@@ -199,7 +221,13 @@ export function CandleChart({ candles, levels, dateMarks, showEma50 = false, sho
     const { data, times } = buildData(candles, dateMarks)
     axisTimesRef.current = times
     series.setData(data as never)
-    chartRef.current?.timeScale().fitContent()
+    const chart = chartRef.current
+    // Time-based (not fitContent + logical-range chaining) so the right bound always
+    // covers the true last mark plus margin — fitContent's own "to" was landing right
+    // on the last mark with no breathing room, hiding it behind the price-scale edge.
+    const range = defaultVisibleRange(times, candles)
+    if (range) chart?.timeScale().setVisibleRange({ from: range.from as never, to: range.to as never })
+    else chart?.timeScale().fitContent()
     updateMarkPositions()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [candles, dateMarks])

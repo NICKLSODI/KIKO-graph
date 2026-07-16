@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { DroppedFile, InputMode } from './types'
 import type { OutputCategory, ScriptFormatKey } from './constants'
 import type { RetrievedProductData } from './features/ingest/ingest'
+import type { NoteProduct } from './features/backtest/types'
 
 export type Screen =
   | 'landing'
@@ -32,6 +33,12 @@ export interface AppState {
   // Step 3 — retrieved product data (kept for downstream branches)
   retrieved: RetrievedProductData | null
 
+  // Product picked from the Backtest & Rank dashboard for factsheet/script generation
+  selectedProduct: NoteProduct | null
+  // Notional entered on the detail page — carried to the factsheet so it can show
+  // min subscription + net-interest-after-tax (null = not entered, those tiles hidden).
+  notional: number | null
+
   // Persona (script branch)
   relationshipStatus: string
   ageRange: string
@@ -50,7 +57,9 @@ export interface AppState {
 }
 
 const INITIAL: AppState = {
-  screen: 'landing',
+  // The batch dashboard (upload → extract → rank → detail → script/factsheet) IS the app now —
+  // the old single-product wizard entry was replaced by it.
+  screen: 'backtest',
   mode: 'text',
   text: '',
   link: '',
@@ -59,6 +68,8 @@ const INITIAL: AppState = {
   targetProduct: '',
   outputCategory: null,
   retrieved: null,
+  selectedProduct: null,
+  notional: null,
   relationshipStatus: '',
   ageRange: '',
   financialKnowledge: '',

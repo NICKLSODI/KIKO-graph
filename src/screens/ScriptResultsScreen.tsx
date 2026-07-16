@@ -1,13 +1,11 @@
 import { useMemo, useState } from 'react'
 import { C } from '../theme'
-import { Screen, Card, StepDots, NavBtn } from '../ui/components'
+import { FlowShell, FlowNav, Card, NavBtn } from '../ui/components'
 import { SCRIPT_FORMATS, type ScriptFormatKey } from '../constants'
 import { buildScriptPrompt, type PersonaOpts } from '../features/script/prompts'
-import { generate } from '../api/generate'
+import { generateCached } from '../api/generate'
 import { openInClaude } from '../lib/claudeApp'
 import type { AppState, Patch } from '../store'
-
-const PERSONA_LABELS = ['ดึงข้อมูล', 'โปรไฟล์ลูกค้า', 'ตั้งค่า Output', 'ผลลัพธ์']
 
 function personaOf(state: AppState): PersonaOpts {
   return {
@@ -44,11 +42,13 @@ export function ScriptResultsScreen({ state, patch, onReset }: { state: AppState
     setTimeout(() => setCopied(null), 2000)
   }
 
-  async function generateActive() {
+  // force=true only when the user explicitly asks to regenerate — otherwise an identical
+  // prompt (same product + persona + format) returns the cached reply and costs no tokens.
+  async function generateActive(force = false) {
     setLoading(activeTab)
     setError(null)
     try {
-      const text = await generate(prompt)
+      const text = await generateCached(prompt, force)
       setResults((r) => ({ ...r, [activeTab]: text }))
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -61,14 +61,19 @@ export function ScriptResultsScreen({ state, patch, onReset }: { state: AppState
   const smallBtn = { padding: '6px 12px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.muted, fontSize: 12.5, cursor: 'pointer' }
 
   return (
-    <Screen>
-      <StepDots step={4} labels={PERSONA_LABELS} />
+    <FlowShell
+      step={4}
+      maxWidth={680}
+      title="ผลลัพธ์"
+      subtitle="แต่ละรูปแบบมีคำสั่งเฉพาะที่อิงตาม Persona และข้อเท็จจริงที่ดึงได้ — สร้างผ่าน Claude Code ไม่ต้องใช้ API key"
+      product={state.retrieved?.productName ?? state.selectedProduct?.productCode ?? null}
+      onStepClick={(n) => {
+        if (n === 1) patch({ screen: 'backtest' })
+        if (n === 2) patch({ screen: 'persona' })
+        if (n === 3) patch({ screen: 'scriptConfig' })
+      }}
+    >
       <Card>
-        <div style={{ fontSize: 17, fontWeight: 600, color: C.text, marginBottom: 4 }}>Analytical Results</div>
-        <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 16 }}>
-          แต่ละรูปแบบมีคำสั่งเฉพาะที่อิงตาม Persona และข้อเท็จจริงที่ดึงได้ — กด "สร้างอัตโนมัติ" ผ่าน Claude Code (ไม่ต้องใช้ API key)
-        </div>
-
         {/* Tabs */}
         <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
           {formats.map((key) => {
@@ -81,8 +86,8 @@ export function ScriptResultsScreen({ state, patch, onReset }: { state: AppState
                 onClick={() => setActiveTab(key)}
                 style={{
                   padding: '6px 14px', borderRadius: 20, fontSize: 12.5, cursor: 'pointer', fontWeight: active ? 600 : 400,
-                  border: `1px solid ${active ? C.teal : C.border}`, background: active ? C.tealLight : C.white,
-                  color: active ? C.teal : done ? C.text : C.muted,
+                  border: `1px solid ${active ? C.primary : C.border}`, background: active ? C.primaryLight : C.white,
+                  color: active ? C.primary : done ? C.text : C.muted,
                 }}
               >
                 {done ? `✓ ${label}` : label}
@@ -91,10 +96,21 @@ export function ScriptResultsScreen({ state, patch, onReset }: { state: AppState
           })}
         </div>
 
-        {/* Auto-generate via Claude Code */}
-        <NavBtn onClick={generateActive} disabled={loading === activeTab}>
-          {loading === activeTab ? 'กำลังสร้าง...' : `สร้าง ${SCRIPT_FORMATS.find((o) => o.key === activeTab)?.label || ''} อัตโนมัติ`}
-        </NavBtn>
+        {/* Auto-generate via Claude Code. Identical prompts reuse a cached reply (0 tokens);
+            "สร้างใหม่" forces a fresh call. */}
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <NavBtn onClick={() => generateActive(false)} disabled={loading === activeTab}>
+            {loading === activeTab ? 'กำลังสร้าง...' : `สร้าง ${SCRIPT_FORMATS.find((o) => o.key === activeTab)?.label || ''} อัตโนมัติ`}
+          </NavBtn>
+          {results[activeTab] && (
+            <button onClick={() => generateActive(true)} disabled={loading === activeTab} style={{ ...smallBtn, cursor: loading === activeTab ? 'default' : 'pointer' }}>
+              สร้างใหม่ (ไม่ใช้แคช)
+            </button>
+          )}
+        </div>
+        <div style={{ fontSize: 11.5, color: C.muted, marginTop: 6 }}>
+          ผลลัพธ์เดิม (ผลิตภัณฑ์ + โปรไฟล์ + รูปแบบเดียวกัน) ถูกแคชไว้ กดซ้ำไม่เสีย token — แก้โปรไฟล์แล้วค่อยเสียใหม่
+        </div>
 
         {error && (
           <div style={{ marginTop: 12, padding: '10px 14px', borderRadius: 8, background: C.amberLight, border: `1px solid ${C.amberBorder}`, color: C.amber, fontSize: 13, lineHeight: 1.6 }}>
@@ -140,30 +156,17 @@ export function ScriptResultsScreen({ state, patch, onReset }: { state: AppState
           </div>
         </details>
 
-        {/* Final result */}
-        {results[activeTab] && (
-          <div style={{ marginTop: 16 }}>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
-              <button onClick={() => copy(results[activeTab], 'result')} style={{ ...smallBtn, background: copied === 'result' ? C.tealLight : C.white, color: copied === 'result' ? C.teal : C.muted }}>
-                {copied === 'result' ? '✓ คัดลอกแล้ว' : 'คัดลอกข้อความ'}
-              </button>
-            </div>
-            <div style={{ fontSize: 14.5, lineHeight: 1.8, whiteSpace: 'pre-wrap', color: C.text, padding: '12px 14px', border: `1px solid ${C.border}`, borderRadius: 10, background: C.bg }}>
-              {results[activeTab]}
-            </div>
-          </div>
-        )}
+      </Card>
 
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 24 }}>
-          <NavBtn onClick={() => patch({ screen: 'scriptConfig' })} secondary>กลับสู่ขั้นตอนก่อนหน้า</NavBtn>
-          <NavBtn onClick={() => patch({ screen: 'chooseOutput' })} secondary>เลือกผลลัพธ์อื่น</NavBtn>
-        </div>
-        <div style={{ display: 'flex', justifyContent: 'center', marginTop: 14 }}>
+      <FlowNav
+        back={{ label: 'ตั้งค่า Output', onClick: () => patch({ screen: 'scriptConfig' }) }}
+        next={{ label: 'เสร็จสิ้น — กลับ Dashboard', onClick: () => patch({ screen: 'backtest' }) }}
+        extra={
           <button onClick={onReset} style={{ background: 'none', border: 'none', color: C.muted, fontSize: 12.5, textDecoration: 'underline', cursor: 'pointer' }}>
             เริ่มต้นใหม่ทั้งหมด
           </button>
-        </div>
-      </Card>
-    </Screen>
+        }
+      />
+    </FlowShell>
   )
 }
