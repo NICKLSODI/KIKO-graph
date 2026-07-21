@@ -27,7 +27,9 @@ export const NOTE_EXTRACTION_INSTRUCTIONS = `คุณเป็นผู้เ�
   "koObservationDates": string[],      // วันสังเกตการณ์ KO โดยเฉพาะ (ถ้าระบุแยก) รูปแบบ YYYY-MM-DD
   "koObservationFrequency": "daily" | "monthly" | "quarterly" | null, // ถ้าเอกสารบอกแค่ความถี่ (ทั้งภาษาอังกฤษเช่น "Monthly Observe", "Daily Observe" และภาษาไทยเช่น "สังเกตรายวัน"→daily, "สังเกตรายเดือน"→monthly, "สังเกตรายไตรมาส"→quarterly) แทนที่จะมี list วันที่ชัดเจน ให้ใส่ความถี่ตรงนี้แทนเสมอ — ถ้ามี koObservationDates ชัดเจนอยู่แล้วใส่ null ก็ได้
   "koType": "memory" | "final-valuation" | null, // รูปแบบการตัดสิน KO: "memory" = ชนระดับ KO ในวันสังเกตการณ์ใดก็ถือว่า KO ทันที (autocall/memory), "final-valuation" = ตัดสินเฉพาะวันประเมินราคาสุดท้าย (Final Valuation Date) เท่านั้น — ถ้าเอกสารไม่ระบุชัดให้ null
+  "kiType": "daily" | "final-valuation" | null, // รูปแบบการตัดสิน KI: "daily" = ราคาแตะระดับ KI วันไหนก็ถือว่าเกิด KI ทันที (barrier ต่อเนื่องรายวัน — ค่าปกติ/ค่าเริ่มต้นของ KIKO ส่วนใหญ่ แม้เอกสารจะไม่ได้พิมพ์คำว่า "Daily" ไว้ตรงๆ ก็ตอบ "daily"), "final-valuation" = ตัดสิน KI เฉพาะวันประเมินราคาสุดท้ายเท่านั้น (มักเขียนว่า "At Final Valuation", "European KI") — เคสนี้พบน้อยกว่า ต้องมั่นใจว่าเอกสารระบุชัดเจนจริงๆ ก่อนตอบ "final-valuation" ถ้าเอกสารไม่พูดถึง KI observation เลยให้ null (ระบบจะถือว่าเป็น daily โดยปริยาย)
   "summary": string,                   // สรุปผลิตภัณฑ์ 2-4 บรรทัด ภาษาไทย
+  "invxPick": boolean,                 // true เฉพาะเมื่อเอกสารมีเครื่องหมายแนะนำของ INVX กำกับผลิตภัณฑ์นี้ไว้ เช่น "💎 INVX recommend", "INVX Pick", "INVX recommended" — ถ้าไม่มีเครื่องหมายนี้ให้เป็น false เสมอ ห้ามเดาจากคุณภาพผลิตภัณฑ์เอง
   "variantFields": {                   // บล็อกข้อมูลสำหรับสร้าง Factsheet — ทุกค่าตัวเลขใส่เป็น "ข้อความพร้อมหน่วยตามที่ปรากฏในเอกสารจริง" (เช่น "115%", "20% flat", "16.00% p.a.") ห้ามแปลงหน่วยหรือคำนวณเอง
     "family": string | null,           // ชื่อประเภทผลิตภัณฑ์ตามเอกสาร เช่น Sharkfin, Twin Win, KIKO, BEN, Booster, FCN
     "underlyings": string[] | null,    // รายชื่อหลักทรัพย์อ้างอิงตามที่ปรากฏในเอกสาร
@@ -74,7 +76,11 @@ export const NOTE_BATCH_INSTRUCTIONS = `${NOTE_EXTRACTION_INSTRUCTIONS}
 function num(v: unknown): number | null {
   if (typeof v === 'number' && Number.isFinite(v)) return v
   if (typeof v === 'string') {
-    const n = Number(v.replace('%', '').trim())
+    // Number('') === 0 — guard the empty/whitespace case so a blank field becomes null
+    // (not a literal 0 that would collapse Strike/KI/KO levels and blow up buffer%).
+    const t = v.replace('%', '').trim()
+    if (!t) return null
+    const n = Number(t)
     return Number.isFinite(n) ? n : null
   }
   return null
@@ -119,6 +125,12 @@ function koTypeOf(v: unknown): 'memory' | 'final-valuation' | null {
   if (s && s.startsWith('final')) return 'final-valuation'
   return null
 }
+function kiTypeOf(v: unknown): 'daily' | 'final-valuation' | null {
+  const s = str(v)?.toLowerCase()
+  if (s === 'daily') return 'daily'
+  if (s && s.startsWith('final')) return 'final-valuation'
+  return null
+}
 
 // Parse "6M", "1Y", "12 เดือน", "1 ปี" → months.
 function tenorToMonths(tenor: string | null): number | null {
@@ -159,7 +171,9 @@ function fromObject(p: Record<string, unknown>, raw: string, sourceFile: string,
     koObservationDates: strArr(p.koObservationDates),
     koObservationFrequency: frequencyOf(p.koObservationFrequency),
     koType: koTypeOf(p.koType),
+    kiType: kiTypeOf(p.kiType),
     summary: str(p.summary) ?? '',
+    invxPick: p.invxPick === true,
     variantFields,
     raw,
     sourceFile,

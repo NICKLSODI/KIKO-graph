@@ -26,6 +26,8 @@ export interface Deal {
     minRedemption: string | null
     minCoupon: string | null
     coupon: string | null
+    couponBarrier: string | null
+    bonus: string | null
   }
   variantFields: Record<string, string | null>
   /** Optional subscription notional — enables min-subscription + net-interest tiles/column. */

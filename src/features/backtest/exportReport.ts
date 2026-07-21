@@ -1,51 +1,110 @@
 import { createChart, CandlestickSeries, LineStyle, ColorType, type AutoscaleInfoProvider } from 'lightweight-charts'
 import { koTimesFor, levelsAndMarksFor } from './chartData'
-import type { DetailProduct, ScoredProduct, UnderlyingSeries } from './types'
-import { STRUCTURE_TYPE_LABELS } from './types'
+import { backtestDetail } from './engine'
+import { scoreProducts, PROFILE_WEIGHTS, PROFILE_LABELS } from './scoring'
+import type { NoteProduct } from './types'
+import type { BacktestResult, DetailProduct, ScoredProduct, UnderlyingSeries } from './types'
+import { STRUCTURE_TYPE_LABELS, koObservationLabel, kiObservationLabel } from './types'
 import { LEVEL_COLORS, LEVEL_LABELS } from '../../types'
 import type { DateMark, Level } from '../../types'
 import { buildData, defaultVisibleRange, nearestAxisTime } from '../../components/CandleChart'
 
 const COLUMNS = [
   'Group', 'Rank', 'Product', 'Underlying', 'Structure', 'Coupon(%p.a.)',
-  'KI(%)', 'KO(%)', 'Buffer(%)', 'Vol(%)', 'Tenor', 'Issuer', 'Score',
+  'KI(%)', 'KO(%)', 'Buffer(%)', 'Vol(%)', 'Tenor', 'Issuer',
+  'Score:Aggressive', 'Score:Balanced', 'Score:Save', 'Best-fit customer', 'INVX Pick',
 ]
 
-function rowsOf(scored: ScoredProduct[]): (string | number)[][] {
-  const line = (s: ScoredProduct): (string | number)[] => [
-    s.backtest.verdict === 'pass' ? 'Historical Pass' : 'Historical Knocked',
-    s.rank,
-    s.product.productCode ?? s.product.sourceFile,
-    s.product.underlyings.join(' '),
-    STRUCTURE_TYPE_LABELS[s.product.structureType],
-    s.product.couponPa ?? '',
-    s.product.kiPct ?? '',
-    s.product.koPct ?? '',
-    s.backtest.bufferPct ?? '',
-    s.backtest.volatilityPct ?? '',
-    s.product.tenor ?? '',
-    s.product.issuer ?? '',
-    s.score,
-  ]
-  const pass = scored.filter((s) => s.backtest.verdict === 'pass').sort((a, b) => a.rank - b.rank)
-  const knocked = scored.filter((s) => s.backtest.verdict === 'knocked').sort((a, b) => a.rank - b.rank)
-  return [...pass, ...knocked].map(line)
+// Which customer profile a product suits best = the profile under which it scores highest.
+// Scores are the same 0-100 weighted-average scale across profiles, so they're comparable.
+const BEST_FIT_LABEL: Record<'aggressive' | 'balanced' | 'save', string> = {
+  aggressive: 'เน้นผลตอบแทน (Aggressive)',
+  balanced: 'สมดุล (Balanced)',
+  save: 'เน้นปลอดภัย (Save)',
 }
 
-// Download a CSV (UTF-8 BOM so Excel reads Thai correctly).
-export function exportCsv(scored: ScoredProduct[]): void {
+interface ProfileScores { aggressive: number; balanced: number; save: number; bestFit: 'aggressive' | 'balanced' | 'save' }
+
+// Score every rankable (KIKO) product under all three fixed profiles at once, so the CSV
+// carries all perspectives instead of just whichever profile happened to be selected on
+// screen. Non-KIKO products aren't scored — they never enter this map.
+function allProfileScores(list: DetailProduct[]): Map<string, ProfileScores> {
+  const rankable = list.filter((s) => s.rank != null).map((s) => ({ product: s.product, backtest: s.backtest }))
+  const byProfile = {
+    aggressive: scoreProducts(rankable, PROFILE_WEIGHTS.aggressive),
+    balanced: scoreProducts(rankable, PROFILE_WEIGHTS.balanced),
+    save: scoreProducts(rankable, PROFILE_WEIGHTS.save),
+  }
+  const out = new Map<string, ProfileScores>()
+  for (const item of rankable) {
+    const id = item.product.id
+    const a = byProfile.aggressive.find((s) => s.product.id === id)?.score ?? 0
+    const b = byProfile.balanced.find((s) => s.product.id === id)?.score ?? 0
+    const sv = byProfile.save.find((s) => s.product.id === id)?.score ?? 0
+    const bestFit = a >= b && a >= sv ? 'aggressive' : b >= sv ? 'balanced' : 'save'
+    out.set(id, { aggressive: a, balanced: b, save: sv, bestFit })
+  }
+  return out
+}
+
+// Canonical export ordering — ranked Pass, ranked Knocked, then unranked non-KIKO.
+// Shared by the CSV rows and the batch-zip file numbering so they always agree.
+function orderForExport(list: DetailProduct[]): DetailProduct[] {
+  const ranked = list.filter((s) => s.rank != null)
+  const pass = ranked.filter((s) => s.backtest.verdict === 'pass').sort((a, b) => a.rank! - b.rank!)
+  const knocked = ranked.filter((s) => s.backtest.verdict === 'knocked').sort((a, b) => a.rank! - b.rank!)
+  const unranked = list.filter((s) => s.rank == null)
+  return [...pass, ...knocked, ...unranked]
+}
+
+function rowsOf(list: DetailProduct[]): (string | number)[][] {
+  const scores = allProfileScores(list)
+  const line = (s: DetailProduct): (string | number)[] => {
+    const ps = scores.get(s.product.id)
+    return [
+      s.rank == null ? 'Unranked (non-KIKO)' : s.backtest.verdict === 'pass' ? 'Historical Pass' : 'Historical Knocked',
+      s.rank ?? '',
+      s.product.productCode ?? s.product.sourceFile,
+      s.product.underlyings.join(' '),
+      STRUCTURE_TYPE_LABELS[s.product.structureType],
+      s.product.couponPa ?? '',
+      s.product.kiPct ?? '',
+      s.product.koPct ?? '',
+      s.backtest.bufferPct ?? '',
+      s.backtest.volatilityPct ?? '',
+      s.product.tenor ?? '',
+      s.product.issuer ?? '',
+      ps ? ps.aggressive : '',
+      ps ? ps.balanced : '',
+      ps ? ps.save : '',
+      ps ? BEST_FIT_LABEL[ps.bestFit] : '',
+      s.product.invxPick ? 'Yes' : '',
+    ]
+  }
+  return orderForExport(list).map(line)
+}
+
+// UTF-8 BOM so Excel reads Thai correctly.
+function csvText(list: DetailProduct[]): string {
   const esc = (v: string | number) => {
     const s = String(v)
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
   }
-  const lines = [COLUMNS, ...rowsOf(scored)].map((r) => r.map(esc).join(','))
-  const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' })
+  const lines = [COLUMNS, ...rowsOf(list)].map((r) => r.map(esc).join(','))
+  return '﻿' + lines.join('\r\n')
+}
+
+function downloadBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = 'kiko-backtest-summary.csv'
+  a.download = filename
   a.click()
   URL.revokeObjectURL(url)
+}
+
+export function exportCsv(scored: ScoredProduct[]): void {
+  downloadBlob(new Blob([csvText(scored)], { type: 'text/csv;charset=utf-8' }), 'kiko-backtest-summary.csv')
 }
 
 const CHART_W = 1100
@@ -167,18 +226,16 @@ function fmt(v: number | null, suffix = '%'): string {
 
 function factsFor(s: DetailProduct): [string, string][] {
   const p = s.product
-  const bt = s.backtest
   return [
     ['หุ้นอ้างอิง', p.underlyings.join(', ') || '-'],
     ['ประเภทโครงสร้าง', STRUCTURE_TYPE_LABELS[p.structureType]],
     ['Strike', fmt(p.strikePct)],
     ['Knock-In / Knock-Out', `${p.kiPct ?? '–'} / ${p.koPct ?? '–'}`],
-    ['KO observation', p.koType == null ? '-' : p.koType === 'memory' ? 'Memory' : 'Final Valuation'],
+    ['KO observation', koObservationLabel(p)],
+    ['KI observation', kiObservationLabel(p)],
     ['Coupon (p.a.)', fmt(p.couponPa)],
     ['Tenor', p.tenor ?? '-'],
     ['Issuer', p.issuer ?? '-'],
-    ['Buffer จาก KI', bt.bufferPct == null ? '-' : `${bt.bufferPct}%`],
-    ['Volatility (ต่อปี)', bt.volatilityPct == null ? '-' : `${bt.volatilityPct}%`],
   ]
 }
 
@@ -194,13 +251,11 @@ async function productCardHtml(s: DetailProduct, accent: string): Promise<string
           bt.series.map(async (ser) => {
             const { levels, marks } = levelsAndMarksFor(ser, koTimes)
             const img = await renderSeriesImage(ser.candles, levels, marks)
-            const hitBadge = ser.knockedIn ? `<span class="badge-hit">⚠ เคยชน KI</span>` : ''
             return `
               <div class="series">
                 <div class="series-head">
                   <b>${ser.symbol}</b>
                   <span class="muted">initial ${ser.initialPrice?.toFixed(2) ?? '-'}</span>
-                  ${hitBadge}
                 </div>
                 <img src="${img}" width="100%" />
               </div>`
@@ -212,11 +267,14 @@ async function productCardHtml(s: DetailProduct, accent: string): Promise<string
   const factsHtml = facts.map(([k, v]) => `<div class="fact"><span class="fact-k">${k}</span><span class="fact-v">${v}</span></div>`).join('')
 
   // Client-facing document — the internal rank/score never appears here (CSV keeps it).
+  // invxPick is the firm's own recommendation stamp (not an internal metric), so it stays.
+  const invxBadge = p.invxPick ? `<span class="badge-invx">💎 INVX Pick</span>` : ''
   return `
     <section class="card">
       <div class="card-head" style="border-left-color:${accent}">
         <div class="card-title">
           <b>${p.productCode ?? p.sourceFile}</b>
+          ${invxBadge}
         </div>
         <div class="summary">${p.summary || ''}</div>
       </div>
@@ -254,7 +312,7 @@ export async function printProductReport(s: DetailProduct, windowMonths: number)
     .series-head{font-size:14.5px;margin-bottom:6px;display:flex;align-items:center;gap:10px}
     .series-head .muted{color:#6B6A63;font-weight:400;font-size:13px}
     .series img{display:block;width:100%}
-    .badge-hit{color:#993C1D;background:#FAECE7;border:1px solid #F0997B;border-radius:6px;padding:2px 8px;font-size:12.5px}
+    .badge-invx{color:#854F0B;background:#FAEEDA;border:1px solid #EF9F27;border-radius:999px;padding:2px 10px;font-size:12.5px;font-weight:600}
     .chart-error{color:#854F0B;font-size:13.5px}
   </style></head><body>
     <h1>${title}</h1>
@@ -323,46 +381,82 @@ const F_TITLE = `bold 38px ${FONT_STACK}`
 const F_SUB = `20px ${FONT_STACK}`
 const F_SUMMARY = `21px ${FONT_STACK}`
 const F_FACT_K = `21px ${FONT_STACK}`
-const F_FACT_V = `bold 21px ${FONT_STACK}`
+const F_FACT_V_SIZE = 21
 const F_SERIES_HEAD = `bold 23px ${FONT_STACK}`
+
+// Some fact values ("Monthly Observation (Final Valuation)") are long, unlike the short
+// ones (Strike, Tenor) the 2-column fact grid was originally sized for — right-aligning
+// at full size let a long value overflow left past its own label. Shrink the value font
+// until it fits the column instead of wrapping (keeps every fact to one tidy line).
+function fittedFactValueFont(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string {
+  let size = F_FACT_V_SIZE
+  while (size > 13) {
+    const font = `bold ${size}px ${FONT_STACK}`
+    ctx.font = font
+    if (ctx.measureText(text).width <= maxWidth) return font
+    size -= 1
+  }
+  return `bold 13px ${FONT_STACK}`
+}
 const F_SERIES_SUB = `19px ${FONT_STACK}`
 const F_FOOTER = `16px ${FONT_STACK}`
 
-// Build a single tall JPG (product header + facts + every underlying's chart), sized for
-// reading full-screen on a phone, then download it — same content as the PDF report but as
-// one shareable image instead of a multi-file print job.
-export async function downloadProductJpg(s: DetailProduct, windowMonths: number): Promise<void> {
+// Human labels for the backtest windows.
+const WINDOW_LABELS: Record<number, string> = { 6: '6 เดือน', 12: '1 ปี', 24: '2 ปี' }
+const windowLabel = (m: number): string => WINDOW_LABELS[m] ?? `${m} เดือน`
+
+/** One backtest window's result, for a product report that stacks several windows. */
+export interface WindowResult {
+  windowMonths: number
+  backtest: BacktestResult
+}
+
+// Build a single tall report canvas: product header + facts (once) + one chart section
+// per backtest window (each labeled 6 เดือน / 1 ปี / 2 ปี with its own verdict + underlying
+// charts). Sized for reading full-screen on a phone; the batch ZIP also paginates it to PDF.
+async function buildProductJpgCanvas(s: DetailProduct, windows: WindowResult[]): Promise<{ canvas: HTMLCanvasElement; title: string }> {
   const p = s.product
-  const bt = s.backtest
   const koTimes = koTimesFor(p)
   const title = p.productCode ?? p.sourceFile
-  const accent = bt.verdict === 'pass' ? '#0F6E56' : '#993C1D'
+  // INVX's own recommendation stamp — client-facing, unlike the internal score/rank this
+  // export deliberately omits. Only the ON-CANVAS heading gets the prefix (reuses the
+  // existing wrap/measure logic); `title` itself stays clean since it's also the filename.
+  const displayTitle = (p.invxPick ? '💎 INVX Pick — ' : '') + title
+  const accent = '#0B3D56'
   const facts = factsFor(s)
   // Taller than the PDF's chart ratio and bigger axis text — the JPG is read full-screen
   // on a phone, where the print-sized chart came out too small.
   const chartH = Math.round(JPG_CONTENT_W * 0.42)
 
-  const seriesData = bt.error
-    ? []
-    : await Promise.all(
-        bt.series.map(async (ser) => {
-          const { levels, marks } = levelsAndMarksFor(ser, koTimes)
-          const canvas = await renderSeriesCanvas(ser.candles, levels, marks, JPG_CONTENT_W, chartH, 16)
-          return { ser, canvas }
-        }),
-      )
+  // Render every window's underlying charts up front (need their count for layout height).
+  const sections = await Promise.all(
+    windows.map(async (w) => {
+      const bt = w.backtest
+      const charts = bt.error
+        ? []
+        : await Promise.all(
+            bt.series.map(async (ser) => {
+              const { levels, marks } = levelsAndMarksFor(ser, koTimes)
+              const canvas = await renderSeriesCanvas(ser.candles, levels, marks, JPG_CONTENT_W, chartH, 16)
+              return { ser, canvas }
+            }),
+          )
+      const verdictText = bt.verdict === 'pass' ? 'Historical Pass — ไม่เคยชน KI/KO' : 'Historical Knocked — เคยชน KI/KO'
+      return { windowMonths: w.windowMonths, error: bt.error, verdictText, charts }
+    }),
+  )
 
   const meas = document.createElement('canvas').getContext('2d')!
 
   // Client-facing image — no internal score/rank here (CSV keeps them).
-  const subtitle = `แบ็คเทสต์ย้อนหลัง ${windowMonths} เดือน • สร้างเมื่อ ${new Date().toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' })}`
+  const winList = windows.map((w) => windowLabel(w.windowMonths)).join(' / ')
+  const subtitle = `แบ็คเทสต์ย้อนหลัง ${winList} • สร้างเมื่อ ${new Date().toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' })}`
   meas.font = F_TITLE
-  const titleLines = wrapText(meas, title, JPG_CONTENT_W)
+  const titleLines = wrapText(meas, displayTitle, JPG_CONTENT_W)
   meas.font = F_SUB
   const subLines = wrapText(meas, subtitle, JPG_CONTENT_W)
   meas.font = F_SUMMARY
   const summaryLines = p.summary ? wrapText(meas, p.summary, JPG_CONTENT_W) : []
-  const errorLines = bt.error ? wrapText(meas, `โหลดกราฟไม่ได้: ${bt.error}`, JPG_CONTENT_W) : []
   meas.font = F_FOOTER
   const footerLines = wrapText(
     meas,
@@ -374,6 +468,7 @@ export async function downloadProductJpg(s: DetailProduct, windowMonths: number)
   const SUB_LH = 28
   const SUMMARY_LH = 30
   const FACT_LH = 34
+  const WINDOW_HEAD_LH = 40
   const SERIES_HEAD_LH = 30
   const FOOTER_LH = 24
 
@@ -389,10 +484,11 @@ export async function downloadProductJpg(s: DetailProduct, windowMonths: number)
   h += summaryLines.length * SUMMARY_LH + (summaryLines.length ? 12 : 0)
   h += 4 + 16 // accent rule + gap
   h += factRows * FACT_LH + 12
-  h += errorLines.length * SUMMARY_LH
-  for (const { ser } of seriesData) {
-    void ser
-    h += SERIES_HEAD_LH + chartH + 16
+  for (const sec of sections) {
+    h += WINDOW_HEAD_LH
+    if (sec.error) h += SUMMARY_LH
+    for (const c of sec.charts) { void c; h += SERIES_HEAD_LH + chartH + 16 }
+    h += 8
   }
   h += 12 // rule above footer
   h += footerLines.length * FOOTER_LH
@@ -443,7 +539,12 @@ export async function downloadProductJpg(s: DetailProduct, windowMonths: number)
     ctx.font = F_FACT_K
     ctx.fillStyle = MUTED_COLOR
     ctx.fillText(k, x0, y + 22)
-    ctx.font = F_FACT_V
+    // Value is right-aligned in the SAME column the label occupies — its available width
+    // is what's left after the label + a gap, not the whole column (a value that merely
+    // "fits the column" can still be wide enough to overlap the label it sits next to).
+    const labelW = ctx.measureText(k).width
+    const valueMaxW = Math.max(60, factColW - labelW - 16)
+    ctx.font = fittedFactValueFont(ctx, v, valueMaxW)
     ctx.fillStyle = TEXT_COLOR
     ctx.textAlign = 'right'
     ctx.fillText(v, x0 + factColW, y + 22)
@@ -452,29 +553,40 @@ export async function downloadProductJpg(s: DetailProduct, windowMonths: number)
   }
   y += 12
 
-  if (errorLines.length) {
-    ctx.font = F_SUMMARY
-    ctx.fillStyle = '#854F0B'
-    for (const l of errorLines) {
-      y += SUMMARY_LH
-      ctx.fillText(l, JPG_MARGIN, y - 8)
-    }
-  }
-
-  for (const { ser, canvas: chartCanvas } of seriesData) {
+  for (const sec of sections) {
+    // Window band: label ("ย้อนหลัง 1 ปี") + verdict on a tinted strip.
+    y += WINDOW_HEAD_LH
+    ctx.fillStyle = '#EEF3F6'
+    ctx.fillRect(JPG_MARGIN, y - WINDOW_HEAD_LH + 6, JPG_CONTENT_W, WINDOW_HEAD_LH - 6)
     ctx.font = F_SERIES_HEAD
-    ctx.fillStyle = TEXT_COLOR
-    y += SERIES_HEAD_LH
-    ctx.fillText(ser.symbol, JPG_MARGIN, y - 8)
-    // Measure the symbol with the SAME bold font it was drawn in — measuring with the
-    // stale `meas` context (last set to the footer font) made the sub-text overlap it.
-    const symbolW = ctx.measureText(ser.symbol).width
+    ctx.fillStyle = accent
+    ctx.fillText(`ย้อนหลัง ${windowLabel(sec.windowMonths)}`, JPG_MARGIN + 12, y - 10)
     ctx.font = F_SERIES_SUB
     ctx.fillStyle = MUTED_COLOR
-    const subText = `initial ${ser.initialPrice?.toFixed(2) ?? '-'}${ser.knockedIn ? ' • ⚠ เคยชน KI' : ''}`
-    ctx.fillText(subText, JPG_MARGIN + symbolW + 14, y - 8)
-    ctx.drawImage(chartCanvas, JPG_MARGIN, y, JPG_CONTENT_W, chartH)
-    y += chartH + 16
+    ctx.textAlign = 'right'
+    ctx.fillText(sec.verdictText, JPG_MARGIN + JPG_CONTENT_W - 12, y - 11)
+    ctx.textAlign = 'left'
+
+    if (sec.error) {
+      ctx.font = F_SUMMARY
+      ctx.fillStyle = '#854F0B'
+      y += SUMMARY_LH
+      ctx.fillText(`โหลดกราฟไม่ได้: ${sec.error}`, JPG_MARGIN, y - 8)
+    }
+    for (const { ser, canvas: chartCanvas } of sec.charts) {
+      ctx.font = F_SERIES_HEAD
+      ctx.fillStyle = TEXT_COLOR
+      y += SERIES_HEAD_LH
+      ctx.fillText(ser.symbol, JPG_MARGIN, y - 8)
+      const symbolW = ctx.measureText(ser.symbol).width
+      ctx.font = F_SERIES_SUB
+      ctx.fillStyle = MUTED_COLOR
+      const subText = `initial ${ser.initialPrice?.toFixed(2) ?? '-'}`
+      ctx.fillText(subText, JPG_MARGIN + symbolW + 14, y - 8)
+      ctx.drawImage(chartCanvas, JPG_MARGIN, y, JPG_CONTENT_W, chartH)
+      y += chartH + 16
+    }
+    y += 8
   }
 
   ctx.strokeStyle = '#E2E0D5'
@@ -490,12 +602,232 @@ export async function downloadProductJpg(s: DetailProduct, windowMonths: number)
     ctx.fillText(l, JPG_MARGIN, y - 6)
   }
 
-  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92))
+  return { canvas, title }
+}
+
+function canvasToJpgBlob(canvas: HTMLCanvasElement): Promise<Blob | null> {
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92))
+}
+
+export async function downloadProductJpg(s: DetailProduct, windowMonths: number): Promise<void> {
+  const { canvas, title } = await buildProductJpgCanvas(s, [{ windowMonths, backtest: s.backtest }])
+  const blob = await canvasToJpgBlob(canvas)
   if (!blob) return
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `${title}-kiko.jpg`
-  a.click()
-  URL.revokeObjectURL(url)
+  downloadBlob(blob, `${title}-kiko.jpg`)
+}
+
+// Paginate the tall report canvas into an A4 PDF (jsPDF lazy-loaded — it's only needed
+// for exports, so it stays out of the main bundle).
+async function canvasToPdfBlob(canvas: HTMLCanvasElement): Promise<Blob> {
+  const { jsPDF } = await import('jspdf')
+  const PAGE_W_MM = 210
+  const PAGE_H_MM = 297
+  const pageHpx = Math.floor(canvas.width * (PAGE_H_MM / PAGE_W_MM))
+  const pages = Math.max(1, Math.ceil(canvas.height / pageHpx))
+  const pdf = new jsPDF({ unit: 'mm', format: 'a4' })
+  for (let i = 0; i < pages; i++) {
+    if (i > 0) pdf.addPage()
+    const sliceH = Math.min(pageHpx, canvas.height - i * pageHpx)
+    const slice = document.createElement('canvas')
+    slice.width = canvas.width
+    slice.height = sliceH
+    const ctx = slice.getContext('2d')!
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, slice.width, slice.height)
+    ctx.drawImage(canvas, 0, i * pageHpx, canvas.width, sliceH, 0, 0, canvas.width, sliceH)
+    pdf.addImage(slice.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, PAGE_W_MM, sliceH * (PAGE_W_MM / canvas.width))
+  }
+  return pdf.output('blob')
+}
+
+const safeName = (t: string) => t.replace(/[^\w.ก-๙-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'product'
+
+// Every product report shows all three standard backtest windows stacked.
+export const EXPORT_WINDOWS = [6, 12, 24]
+
+// Backtest one product across all EXPORT_WINDOWS. Prices are cached from the scoring pass,
+// so the extra windows are CPU-only (no extra network) — but each needs its own detail
+// series since candles are cropped per window.
+async function windowsFor(product: DetailProduct['product']): Promise<WindowResult[]> {
+  const out: WindowResult[] = []
+  for (const windowMonths of EXPORT_WINDOWS) {
+    out.push({ windowMonths, backtest: await backtestDetail(product, windowMonths) })
+  }
+  return out
+}
+
+// One-click batch export, one folder per product:
+//   summary.csv
+//   01-<product>/<product>.pdf + .jpg + -factsheet-th/en.html
+// Each product report stacks all three windows (6M / 1Y / 2Y). Factsheets are included
+// only when the real-data mapper succeeds — the illustrative fallback template must never
+// land in a client-bound zip unnoticed.
+function batchStamp(): string {
+  const d = new Date()
+  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
+}
+
+// Build the batch ZIP as a Blob (shared by the download button and the email flow).
+export async function buildBatchZipBlob(
+  list: DetailProduct[],
+  onProgress?: (done: number, total: number) => void,
+): Promise<Blob> {
+  const [{ default: JSZip }, { renderFactsheet }] = await Promise.all([
+    import('jszip'),
+    import('../factsheet/adapter'), // lazy — pulls the 145kB render engine only for exports
+  ])
+  const zip = new JSZip()
+  const ordered = orderForExport(list)
+  zip.file('summary.csv', csvText(ordered))
+  let done = 0
+  for (const s of ordered) {
+    onProgress?.(done, ordered.length)
+    const windows = await windowsFor(s.product)
+    const { canvas, title } = await buildProductJpgCanvas(s, windows)
+    const name = safeName(title)
+    const folder = zip.folder(`${String(done + 1).padStart(2, '0')}-${name}`)!
+    const jpg = await canvasToJpgBlob(canvas)
+    if (jpg) folder.file(`${name}.jpg`, jpg)
+    folder.file(`${name}.pdf`, await canvasToPdfBlob(canvas))
+
+    // Factsheet with Spot = latest close per underlying (same data the dashboard button
+    // passes to the factsheet screen). No notional in batch mode — no shares column.
+    // Any window's series carries the same latest closes; use the longest (last) window.
+    const spots: Record<string, number> = {}
+    let lastTime = 0
+    for (const ser of windows[windows.length - 1].backtest.series) {
+      if (ser.currentPrice != null) spots[ser.symbol] = ser.currentPrice
+      const t = ser.candles[ser.candles.length - 1]?.time
+      if (t && t > lastTime) lastTime = t
+    }
+    const spotAsOf = lastTime ? new Date(lastTime * 1000).toISOString().slice(0, 10) : null
+    for (const lang of ['th', 'en'] as const) {
+      const fs = renderFactsheet(s.product, lang, undefined, null, spots, spotAsOf)
+      if (fs.real) folder.file(`${name}-factsheet-${lang}.html`, fs.html)
+    }
+    done++
+    onProgress?.(done, ordered.length)
+  }
+  return zip.generateAsync({ type: 'blob' })
+}
+
+export async function exportBatchZip(
+  list: DetailProduct[],
+  onProgress?: (done: number, total: number) => void,
+): Promise<void> {
+  const blob = await buildBatchZipBlob(list, onProgress)
+  downloadBlob(blob, `SN-Desk-batch-${batchStamp()}.zip`)
+}
+
+// ── Ranking screenshots ──────────────────────────────────────────────────────
+// One image per backtest window, each stacking the three risk-profile ranking tables
+// (Aggressive / Balanced / Save). Built by rendering the tables off-screen with the SAME
+// global CSS classes the live dashboard uses (.table-wrap / .rank-chip / .badge) and
+// snapshotting with html2canvas, so the picture matches the on-screen look.
+
+/** One window's already-backtested KIKO items — the caller runs backtestScore per window. */
+export interface WindowItems {
+  windowMonths: number
+  items: { product: NoteProduct; backtest: BacktestResult }[]
+}
+
+const RANK_PROFILES = ['aggressive', 'balanced', 'save'] as const
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+const pctOr = (v: number | null) => (v == null ? '-' : `${v}%`)
+
+function rankRowsHtml(group: ScoredProduct[], accent: string): string {
+  if (!group.length) return `<div style="font-size:13px;color:var(--c-muted);padding:8px 12px">— ไม่มีรายการ —</div>`
+  const head = ['Rank', 'Product', 'Underlying', 'Coupon', 'KI / KO', 'Buffer', 'Vol', 'Tenor', 'Issuer', 'Score']
+  const th = 'padding:10px 12px;font-size:12px;font-weight:600;color:var(--c-muted);text-align:left;white-space:nowrap'
+  const td = 'padding:10px 12px;font-size:13px;color:var(--c-text);white-space:nowrap;border-top:1px solid var(--c-border)'
+  const rows = group.map((s) => {
+    const p = s.product
+    const invx = p.invxPick ? ` <span class="badge invx" style="margin-left:6px">💎 INVX Pick</span>` : ''
+    return `<tr>
+      <td style="${td}"><span class="rank-chip${s.rank <= 3 ? ' top' : ''}">${String(s.rank).padStart(2, '0')}</span></td>
+      <td style="${td};font-weight:600">${esc(p.productCode ?? p.sourceFile)}${invx}</td>
+      <td style="${td}">${esc(p.underlyings.join(', ') || '-')}</td>
+      <td style="${td};color:${accent};font-weight:600">${pctOr(p.couponPa)}</td>
+      <td style="${td}">${p.kiPct ?? '–'} / ${p.koPct ?? '–'}</td>
+      <td style="${td}">${s.backtest.bufferPct == null ? '-' : `${s.backtest.bufferPct}%`}</td>
+      <td style="${td}">${s.backtest.volatilityPct == null ? '-' : `${s.backtest.volatilityPct}%`}</td>
+      <td style="${td}">${esc(p.tenor ?? '-')}</td>
+      <td style="${td}">${esc(p.issuer ?? '-')}</td>
+      <td style="${td};font-weight:600">${s.score}</td>
+    </tr>`
+  }).join('')
+  return `<div class="table-wrap"><table>
+    <thead><tr>${head.map((h) => `<th style="${th}">${h}</th>`).join('')}</tr></thead>
+    <tbody>${rows}</tbody></table></div>`
+}
+
+export async function captureRankingImages(byWindow: WindowItems[]): Promise<{ windowMonths: number; blob: Blob }[]> {
+  const html2canvas = (await import('html2canvas')).default
+  const out: { windowMonths: number; blob: Blob }[] = []
+  for (const w of byWindow) {
+    let inner = `<div style="font:700 22px -apple-system,'Segoe UI',Tahoma,sans-serif;color:var(--c-text);margin-bottom:16px">KIKO Ranking — ย้อนหลัง ${windowLabel(w.windowMonths)}</div>`
+    for (const profile of RANK_PROFILES) {
+      const scored = scoreProducts(w.items, PROFILE_WEIGHTS[profile])
+      const pass = scored.filter((s) => s.backtest.verdict === 'pass').sort((a, b) => a.rank - b.rank)
+      const knocked = scored.filter((s) => s.backtest.verdict === 'knocked').sort((a, b) => a.rank - b.rank)
+      inner += `<div style="margin:0 0 22px">
+        <div style="font:600 15px -apple-system,'Segoe UI',Tahoma,sans-serif;color:var(--c-primary);margin-bottom:8px">${esc(PROFILE_LABELS[profile])}</div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><span class="badge pass">Historical Pass</span><span style="font-size:12px;color:var(--c-muted)">${pass.length} รายการ</span></div>
+        ${rankRowsHtml(pass, 'var(--c-teal)')}
+        <div style="display:flex;align-items:center;gap:8px;margin:12px 0 6px"><span class="badge knock">Historical Knocked</span><span style="font-size:12px;color:var(--c-muted)">${knocked.length} รายการ</span></div>
+        ${rankRowsHtml(knocked, 'var(--c-coral)')}
+      </div>`
+    }
+    const container = document.createElement('div')
+    container.style.cssText = 'position:fixed;left:-99999px;top:0;width:1180px;box-sizing:border-box;padding:28px;background:#ffffff'
+    container.innerHTML = inner
+    document.body.appendChild(container)
+    try {
+      const canvas = await html2canvas(container, { scale: 2, backgroundColor: '#ffffff', logging: false })
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
+      if (blob) out.push({ windowMonths: w.windowMonths, blob })
+    } finally {
+      container.remove()
+    }
+  }
+  return out
+}
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => resolve(String(r.result).split(',')[1] ?? '')
+    r.onerror = reject
+    r.readAsDataURL(blob)
+  })
+}
+
+export interface EmailAttachment { filename: string; blob: Blob }
+
+// Auto-send for real via Classic Outlook COM (.Send). Irreversible — the caller confirms
+// with the user first. Body is HTML here (COM accepts it, unlike the mailto draft path).
+export async function sendEmailNow(
+  recipients: string[],
+  subject: string,
+  bodyHtml: string,
+  attachments: EmailAttachment[],
+): Promise<{ recipients: string[]; attachments: number }> {
+  const encoded = await Promise.all(
+    attachments.map(async (a) => ({ filename: a.filename, base64: await blobToBase64(a.blob) })),
+  )
+  const res = await fetch('http://localhost:8000/api/email-send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ recipients, subject, body: bodyHtml, attachments: encoded }),
+  })
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}))
+    throw new Error(detail?.detail || `HTTP ${res.status}`)
+  }
+  return res.json()
+}
+
+export function rankingImageFilename(windowMonths: number): string {
+  const tag = windowMonths === 6 ? '6M' : windowMonths === 12 ? '1Y' : windowMonths === 24 ? '2Y' : `${windowMonths}M`
+  return `ranking-${tag}.png`
 }
