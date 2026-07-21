@@ -37,9 +37,13 @@ export function ScriptResultsScreen({ state, patch, onReset }: { state: AppState
   }, [activeTab, state])
 
   async function copy(text: string, key: string) {
-    await navigator.clipboard.writeText(text)
-    setCopied(key)
-    setTimeout(() => setCopied(null), 2000)
+    // clipboard.writeText rejects on permission denial / no focus / non-secure context —
+    // swallow it so the click handler doesn't emit an unhandled rejection.
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(key)
+      setTimeout(() => setCopied(null), 2000)
+    } catch { /* clipboard unavailable — no feedback, but no crash */ }
   }
 
   // force=true only when the user explicitly asks to regenerate — otherwise an identical
