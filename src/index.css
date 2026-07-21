@@ -411,6 +411,15 @@ button:disabled {
   background: var(--c-surface);
   border-color: var(--c-border);
 }
+/* INVX's own recommendation stamp — no traffic-light dot (not a pass/fail signal). */
+.badge.invx {
+  color: var(--c-amber);
+  background: var(--c-amber-light);
+  border-color: var(--c-amber-border);
+}
+.badge.invx::before {
+  content: none;
+}
 
 /* Rank chip — replaces medal emoji in ranking tables */
 .rank-chip {
