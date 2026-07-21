@@ -8,6 +8,14 @@ import type { NoteProduct } from '../backtest/types'
 
 const pct = (v: number | null): string | null => (v == null ? null : `${v}%`)
 
+// KO observation wording for the factsheet, folding koType 'memory' into the string the
+// deal mapper regex looks for (`/mem/`). Preserves the plain frequency when not a memory note.
+function koObservationText(p: NoteProduct): string | null {
+  const freq = p.koObservationFrequency
+  if (p.koType === 'memory') return freq ? `${freq} memory` : 'memory'
+  return freq
+}
+
 /** Fill variantFields gaps from the note-schema extraction of the same document —
  *  one AI call produced both, so this is still "no invented data", just deduplication. */
 export function backfillFromProduct(vf: VariantFields | null, p: NoteProduct): VariantFields {
@@ -19,7 +27,11 @@ export function backfillFromProduct(vf: VariantFields | null, p: NoteProduct): V
     tenor: base.tenor ?? p.tenor,
     issuer: base.issuer ?? p.issuer,
     tradeDate: base.tradeDate ?? p.fixingDate,
-    koObservation: base.koObservation ?? p.koObservationFrequency,
+    koObservation: base.koObservation ?? koObservationText(p),
+    // Propagate kiType so the mapper describes the barrier correctly: 'final-valuation'
+    // (European) → "At Final Valuation" (mapper regex `/final|european/`); else leave null
+    // so it defaults to the continuous-daily wording the mapper already assumes.
+    kiObservation: base.kiObservation ?? (p.kiType === 'final-valuation' ? 'At Final Valuation' : null),
     ko: base.ko ?? pct(p.koPct),
     knockIn: base.knockIn ?? pct(p.kiPct),
     strike: base.strike ?? pct(p.strikePct),
@@ -48,6 +60,9 @@ export function variantFieldsToDeal(vf: VariantFields): Deal {
       strike: vf.strike ?? null, upperKO: vf.upperKO ?? null, lowerKO: vf.lowerKO ?? null,
       participation: vf.participation ?? null, koRebate: vf.koRebate ?? null, minRedemption: vf.minRedemption ?? null,
       minCoupon: vf.minCoupon ?? null, coupon: vf.coupon ?? null,
+      // BEN factsheets read these headline terms straight off levels; without them the
+      // "Coupon Barrier" and "Bonus Coupon" rows render "—".
+      couponBarrier: vf.couponBarrier ?? null, bonus: vf.bonus ?? null,
     },
     variantFields: {
       family: vf.family ?? null, ko: vf.ko ?? null, ki: vf.knockIn ?? null,

@@ -18,11 +18,16 @@ function windowStart(lastTime: number, windowMonths: number): number {
 // First candle on/after the REAL fixing date from the term sheet. This is the true
 // strike/initial reference price and must NEVER depend on the backtest window —
 // the window only controls how far back we check for a breach, not the reference level.
+// No stated fixing date, or one beyond the data we have (both read as "assume today") —
+// fall back to the LATEST candle, not the oldest: the document gave no reference date, so
+// the most recent close is the only defensible "as of now" price (the old fallback to
+// candles[0] pinned the 📌 fixing marker a year+ in the past on documents with no date).
 function initialCandle(candles: Candle[], fixingDate: string | null): Candle | null {
   if (candles.length === 0) return null
+  const latest = candles[candles.length - 1]
   const fx = dateToUnix(fixingDate)
-  if (fx == null) return candles[0]
-  return candles.find((c) => c.time >= fx) ?? candles[0]
+  if (fx == null) return latest
+  return candles.find((c) => c.time >= fx) ?? latest
 }
 
 const DAY = 86400
@@ -75,7 +80,13 @@ function buildSeries(product: NoteProduct, symbol: string, candles: Candle[], ch
   const closes = windowCandles.map((c) => c.close)
   const minClose = closes.length ? Math.min(...closes) : null
   const currentPrice = candles.length ? candles[candles.length - 1].close : null
-  const knockedIn = kiLevel != null && minClose != null ? minClose <= kiLevel : false
+  // KI assessment respects kiType: 'final-valuation' (European) is checked only at the final
+  // valuation — approximated by the latest close — so a mid-window dip that recovered does NOT
+  // count; the default 'daily' is a continuous barrier over the whole window (minClose).
+  const knockedIn =
+    kiLevel == null ? false
+    : product.kiType === 'final-valuation' ? (currentPrice != null && currentPrice <= kiLevel)
+    : (minClose != null && minClose <= kiLevel)
 
   return {
     symbol,
@@ -139,6 +150,25 @@ function checkKnockOutContinuous(series: UnderlyingSeries[], checkFromTime: numb
   }))
 }
 
+// KO assessed ONLY at the final valuation (koType 'final-valuation'): a note that only
+// autocalls/redeems at maturity, never on an intermediate date. Approximate the final
+// valuation with the latest close (same treatment as final-valuation KI), so a mid-window
+// observation where all legs sat above KO does NOT wrongly mark it knocked out.
+function checkKnockOutFinal(series: UnderlyingSeries[]): boolean {
+  return series.length > 0 && series.every((s) => s.koLevel != null && s.currentPrice != null && s.currentPrice >= s.koLevel)
+}
+
+// Pick the KO test for this note: final-valuation only (koType) takes precedence, else the
+// continuous daily barrier (koObservationFrequency='daily'), else discrete observation dates
+// (memory / default — any past observation date on which all legs were above KO).
+function computeKnockedOut(product: NoteProduct, series: UnderlyingSeries[], checkFromTime: number, lastTime: number): boolean {
+  if (product.koPct == null) return false
+  if (product.koType === 'final-valuation') return checkKnockOutFinal(series)
+  return product.koObservationFrequency === 'daily'
+    ? checkKnockOutContinuous(series, checkFromTime, lastTime)
+    : checkKnockOut(product, series, lastTime, checkFromTime)
+}
+
 // ── Fast scoring pass ─────────────────────────────────────────────────────────
 // Fetches prices for every underlying, computes verdict / buffer% / vol%, but
 // stores EMPTY candles[] in each series so we don't pay the memory / rendering
@@ -193,9 +223,7 @@ export async function backtestScore(product: NoteProduct, windowMonths = 12): Pr
   }
 
   const knockedIn = fullSeries.some((s) => s.knockedIn)
-  const knockedOut = product.koObservationFrequency === 'daily'
-    ? checkKnockOutContinuous(fullSeries, checkFromTime, lastTime)
-    : checkKnockOut(product, fullSeries, lastTime, checkFromTime)
+  const knockedOut = computeKnockedOut(product, fullSeries, checkFromTime, lastTime)
 
   let bufferPct: number | null = null
   if (product.kiPct != null) {
@@ -258,9 +286,7 @@ export async function backtestDetail(product: NoteProduct, windowMonths = 12): P
 
   const checkFromTime = windowStart(lastTime, windowMonths)
   const knockedIn = series.some((s) => s.knockedIn)
-  const knockedOut = product.koObservationFrequency === 'daily'
-    ? checkKnockOutContinuous(series, checkFromTime, lastTime)
-    : checkKnockOut(product, series, lastTime, checkFromTime)
+  const knockedOut = computeKnockedOut(product, series, checkFromTime, lastTime)
 
   let bufferPct: number | null = null
   if (product.kiPct != null) {
