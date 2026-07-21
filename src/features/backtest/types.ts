@@ -68,12 +68,33 @@ export interface NoteProduct {
   koObservationDates: string[] // KO observation dates specifically
   koObservationFrequency: 'daily' | 'monthly' | 'quarterly' | null // cadence, used when the doc gives no explicit date list (e.g. "Monthly Observe")
   koType: 'memory' | 'final-valuation' | null // how KO is assessed: any observation date triggers it (memory/autocall style) vs only the final valuation date
+  kiType: 'daily' | 'final-valuation' | null // how KI is assessed: continuous daily barrier (the common case) vs only checked at the final valuation date (the rarer, starred case)
   summary: string
+  /** True when the source document marks this product as the desk's own pick
+   *  (e.g. "💎 INVX recommend" on a desk listing). Purely a passthrough flag from the
+   *  document — never inferred from score/rank. */
+  invxPick: boolean
   /** Factsheet field block (values as strings with units, e.g. "115%") — extracted in the
    *  same AI call; null for older cached extractions made before this field existed. */
   variantFields: VariantFields | null
   raw: string // raw model output, for the Details tab / debugging
   sourceFile: string // which uploaded file this came from
+}
+
+// Shared display labels for KO/KI observation type — used by both the web detail page
+// and the PDF/JPG export facts, so the two never drift apart. Each dimension has a common
+// case (shown plain) and a rarer case that gets a ✱ star to flag it as worth double-checking.
+// KO: a document that just says "Monthly Observe" with no further qualifier defaults to
+// "Monthly Observe (Final Valuation)" — that's the common case and stays plain; when the
+// document's wording also mentions "Memory" (any monthly date triggers immediately), show
+// "Monthly Observe (Monthly Memory)" — the rarer, starred case.
+// KI: continuous daily barrier is the default assumption (shown even when unspecified);
+// "At Final Valuation" (checked only once) is the special/starred case.
+export function koObservationLabel(p: Pick<NoteProduct, 'koType'>): string {
+  return p.koType === 'memory' ? '✱ Monthly Observe (Monthly Memory)' : 'Monthly Observe (Final Valuation)'
+}
+export function kiObservationLabel(p: Pick<NoteProduct, 'kiType'>): string {
+  return p.kiType === 'final-valuation' ? '✱ At Final Valuation' : 'Daily Observe'
 }
 
 export type Verdict = 'pass' | 'knocked'

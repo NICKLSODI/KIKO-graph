@@ -65,32 +65,41 @@ def get_candles_yahoo(symbol: str, interval: str = "1d", market: str = "thai"):
     yahoo_interval = YAHOO_INTERVAL_MAP.get(interval, "1d")
     yahoo_range = YAHOO_RANGE_MAP.get(interval, "2y")
 
-    res = requests.get(
-        f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}",
-        params={"interval": yahoo_interval, "range": yahoo_range},
-        headers={"User-Agent": "Mozilla/5.0"},
-        timeout=10,
-    )
-    data = res.json()
-    result = data.get("chart", {}).get("result")
+    try:
+        res = requests.get(
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}",
+            params={"interval": yahoo_interval, "range": yahoo_range},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"เชื่อมต่อ Yahoo Finance ไม่ได้: {exc}")
+    if res.status_code == 429:
+        raise HTTPException(status_code=429, detail="Yahoo Finance จำกัดการเรียก (rate limit) — รอสักครู่แล้วลองใหม่")
+    # Yahoo returns an HTML error page (not JSON) when throttled/blocked — guard the parse.
+    try:
+        data = res.json()
+    except ValueError:
+        raise HTTPException(status_code=502, detail=f"Yahoo Finance ตอบกลับไม่ใช่ JSON (HTTP {res.status_code})")
+    result = (data.get("chart") or {}).get("result")
     if not result:
-        error = data.get("chart", {}).get("error", {})
-        raise HTTPException(status_code=404, detail=error.get("description", f"No data for {yahoo_symbol}"))
+        error = (data.get("chart") or {}).get("error") or {}
+        raise HTTPException(status_code=404, detail=error.get("description") or f"No data for {yahoo_symbol}")
 
+    # A symbol can resolve but have no candles in the range — timestamp/quote may be absent.
     chart = result[0]
-    timestamps = chart["timestamp"]
-    quote = chart["indicators"]["quote"][0]
+    timestamps = chart.get("timestamp") or []
+    quote_list = (chart.get("indicators") or {}).get("quote") or []
+    quote = quote_list[0] if quote_list else {}
+    if not timestamps or not quote:
+        raise HTTPException(status_code=404, detail=f"ไม่มีข้อมูลราคาในช่วงที่ขอสำหรับ {yahoo_symbol}")
 
+    opens, highs, lows, closes = (quote.get(k) or [] for k in ("open", "high", "low", "close"))
+    at = lambda arr, i: arr[i] if i < len(arr) else None  # tolerate ragged arrays
     return [
-        {
-            "time": timestamps[i],
-            "open": quote["open"][i],
-            "high": quote["high"][i],
-            "low": quote["low"][i],
-            "close": quote["close"][i],
-        }
+        {"time": timestamps[i], "open": at(opens, i), "high": at(highs, i), "low": at(lows, i), "close": at(closes, i)}
         for i in range(len(timestamps))
-        if quote["close"][i] is not None
+        if at(closes, i) is not None
     ]
 
 
@@ -109,27 +118,36 @@ def get_candles_twelvedata(symbol: str, interval: str = "1day"):
     if not TWELVE_DATA_API_KEY:
         raise HTTPException(status_code=500, detail="ยังไม่ได้ตั้งค่า TWELVE_DATA_API_KEY ใน backend/.env")
 
-    res = requests.get(
-        "https://api.twelvedata.com/time_series",
-        params={"symbol": symbol.upper(), "interval": interval, "outputsize": 300, "apikey": TWELVE_DATA_API_KEY},
-        timeout=10,
-    )
-    data = res.json()
+    try:
+        res = requests.get(
+            "https://api.twelvedata.com/time_series",
+            params={"symbol": symbol.upper(), "interval": interval, "outputsize": 300, "apikey": TWELVE_DATA_API_KEY},
+            timeout=10,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"เชื่อมต่อ Twelve Data ไม่ได้: {exc}")
+    try:
+        data = res.json()
+    except ValueError:
+        raise HTTPException(status_code=502, detail=f"Twelve Data ตอบกลับไม่ใช่ JSON (HTTP {res.status_code})")
     if data.get("status") == "error":
         raise HTTPException(status_code=404, detail=data.get("message", "Twelve Data request failed"))
 
     out = []
     for v in reversed(data.get("values", [])):
-        t = _twelvedata_to_unix(v["datetime"])
+        t = _twelvedata_to_unix(v.get("datetime", ""))
         if t is None:
             continue
-        out.append({
-            "time": t,
-            "open": float(v["open"]),
-            "high": float(v["high"]),
-            "low": float(v["low"]),
-            "close": float(v["close"]),
-        })
+        try:
+            out.append({
+                "time": t,
+                "open": float(v["open"]),
+                "high": float(v["high"]),
+                "low": float(v["low"]),
+                "close": float(v["close"]),
+            })
+        except (KeyError, TypeError, ValueError):
+            continue  # skip rows with missing / non-numeric OHLC instead of 500-ing
     return out
 
 
@@ -369,8 +387,13 @@ def extract_notebooklm(payload: dict = Body(...)):
     if not NLM_BIN:
         raise HTTPException(status_code=500, detail="ไม่พบคำสั่ง nlm บนเครื่อง — ติดตั้ง notebooklm-mcp-cli ก่อน")
 
-    _ensure_nlm_login()
-    notebook_id = _get_or_create_notebook()
+    # These run before the main try below, so map their timeout to 504 here rather than
+    # letting a subprocess.TimeoutExpired escape as an opaque 500.
+    try:
+        _ensure_nlm_login()
+        notebook_id = _get_or_create_notebook()
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="NotebookLM login/เปิด notebook ใช้เวลานานเกินไป (timeout)")
 
     tmpdir = None
     # `source add` has no --json flag, so resolve the new source's id by diffing
@@ -401,19 +424,23 @@ def extract_notebooklm(payload: dict = Body(...)):
         add_args += ["--file", fpath]
 
     source_id = None
+    added_ids: set = set()
     try:
         before_ids = _source_ids(notebook_id)
         add_proc = _run_nlm(add_args)
         if add_proc.returncode != 0:
             detail = (add_proc.stderr or add_proc.stdout or "").strip() or "เพิ่มเอกสารเข้า NotebookLM ไม่สำเร็จ"
             raise HTTPException(status_code=502, detail=f"NotebookLM error: {detail[:500]}")
-        new_ids = _source_ids(notebook_id) - before_ids
-        if len(new_ids) == 1:
-            source_id = next(iter(new_ids))
+        added_ids = _source_ids(notebook_id) - before_ids
+        # Must resolve to EXACTLY one new source. If 0 (add didn't register) or >1 (a
+        # concurrent add), we can't scope the query — querying unscoped would answer across
+        # every source in the shared notebook and mix other term sheets. Bail; the finally
+        # block deletes whatever we added so nothing is orphaned.
+        if len(added_ids) != 1:
+            raise HTTPException(status_code=502, detail=f"ระบุแหล่งข้อมูลที่เพิ่งเพิ่มไม่ได้ (พบ {len(added_ids)} รายการ) — ลองใหม่อีกครั้ง")
+        source_id = next(iter(added_ids))
 
-        query_args = ["notebook", "query", notebook_id, instructions, "--json"]
-        if source_id:
-            query_args += ["--source-ids", source_id]
+        query_args = ["notebook", "query", notebook_id, instructions, "--json", "--source-ids", source_id]
         query_proc = _run_nlm(query_args)
         if query_proc.returncode != 0:
             detail = (query_proc.stderr or query_proc.stdout or "").strip() or "สอบถาม NotebookLM ไม่สำเร็จ"
@@ -434,10 +461,138 @@ def extract_notebooklm(payload: dict = Body(...)):
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="NotebookLM ใช้เวลานานเกินไป (timeout)")
     finally:
-        if source_id:
+        # Delete every source we added (usually one; ≥1 on the mis-scoped bail path) so the
+        # shared notebook stays clean and nothing is orphaned.
+        for sid in added_ids:
             try:
-                _run_nlm(["source", "delete", source_id, "--confirm"], timeout=30)
+                _run_nlm(["source", "delete", sid, "--confirm"], timeout=30)
             except Exception:
                 pass
         if tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ── Outlook auto-send (Classic Outlook COM) ──────────────────────────────────
+# A true auto-send goes through the Outlook COM object (Classic engine — New Outlook is only
+# the visible shell): build a MailItem, attach the files, and .Send() it. This DOES send for
+# real to every recipient — the frontend confirms first.
+_POWERSHELL_BIN = shutil.which("powershell") or shutil.which("pwsh")
+
+# Attach to the ALREADY-RUNNING Outlook (GetActiveObject). If none is up, launch it like a
+# double-click of the icon (`Start-Process outlook`, which goes through the normal login/MFA)
+# and poll until it's ready — DELIBERATELY not `New-Object -ComObject`, because a COM-spawned
+# instance often skips the login the send needs and then .Send() silently fails. This mirrors
+# the pattern in the user's working fundconnext_portfolio.py (ensure_outlook_launched + wait).
+# User text (recipients/subject/body/paths) reaches PowerShell only through a JSON file read
+# with ConvertFrom-Json — never interpolated into the script source, so it can't inject.
+_OUTLOOK_SEND_PS = r"""
+$ErrorActionPreference = 'Stop'
+# -Encoding UTF8: the cfg JSON is written UTF-8, but Windows PowerShell 5.1's Get-Content
+# defaults to the system ANSI codepage (cp874) and mangles Thai — force UTF-8 on read.
+$cfg = Get-Content -Raw -Encoding UTF8 -LiteralPath $env:KIKO_EMAIL_CFG | ConvertFrom-Json
+function Get-Outlook {
+    try { return [Runtime.InteropServices.Marshal]::GetActiveObject('Outlook.Application') } catch { return $null }
+}
+$outlook = Get-Outlook
+if ($null -eq $outlook) {
+    try { Start-Process 'outlook' } catch {}
+    for ($i = 0; $i -lt 30; $i++) {      # wait up to ~60s for it to open + finish login
+        Start-Sleep -Seconds 2
+        $outlook = Get-Outlook
+        if ($null -ne $outlook) { break }
+    }
+}
+if ($null -eq $outlook) { Write-Output 'NOOUTLOOK'; exit 1 }
+$mail = $outlook.CreateItem(0)   # 0 = olMailItem
+$mail.To = ($cfg.recipients -join '; ')
+$mail.Subject = $cfg.subject
+$mail.HTMLBody = $cfg.body
+foreach ($a in $cfg.attachments) {
+    if (Test-Path -LiteralPath $a) { $mail.Attachments.Add($a) | Out-Null }
+}
+$mail.Send()
+Write-Output 'SENT'
+"""
+
+
+@app.post("/api/email-send")
+def email_send(payload: dict = Body(...)):
+    """Send the email for real via Classic Outlook COM (.Send). Irreversible.
+
+    payload: {
+      recipients: string[],
+      subject: str,
+      body: str,                      # HTML
+      attachments: [{ filename: str, base64: str }],
+    }
+    """
+    if os.name != "nt":
+        raise HTTPException(status_code=500, detail="ฟีเจอร์นี้รองรับเฉพาะ Windows เท่านั้น")
+    if not _POWERSHELL_BIN:
+        raise HTTPException(status_code=500, detail="ไม่พบ PowerShell บนเครื่อง — จำเป็นสำหรับสั่ง Outlook")
+
+    payload = payload or {}
+    recipients = [r.strip() for r in (payload.get("recipients") or []) if isinstance(r, str) and r.strip()]
+    subject = payload.get("subject") or ""
+    body = payload.get("body") or ""
+    attachments = payload.get("attachments") or []
+    if not recipients:
+        raise HTTPException(status_code=400, detail="ต้องระบุอีเมลผู้รับอย่างน้อย 1 คน")
+
+    tmpdir = tempfile.mkdtemp(prefix="kiko_send_")
+    try:
+        attach_paths = []
+        for i, a in enumerate(attachments):
+            if not isinstance(a, dict) or not a.get("base64"):
+                continue
+            name = os.path.basename(a.get("filename") or f"attachment_{i}")
+            fpath = os.path.join(tmpdir, name)
+            try:
+                with open(fpath, "wb") as fh:
+                    fh.write(base64.b64decode(a["base64"]))
+            except Exception:
+                raise HTTPException(status_code=400, detail=f"ไฟล์แนบ {name} ไม่ถูกต้อง (decode ไม่สำเร็จ)")
+            attach_paths.append(fpath)
+
+        cfg = {"recipients": recipients, "subject": subject, "body": body, "attachments": attach_paths}
+        cfg_path = os.path.join(tmpdir, "_send_cfg.json")
+        with open(cfg_path, "w", encoding="utf-8") as fh:
+            json.dump(cfg, fh, ensure_ascii=False)
+
+        env = {**os.environ, "KIKO_EMAIL_CFG": cfg_path}
+        proc = subprocess.run(
+            [_POWERSHELL_BIN, "-NoProfile", "-NonInteractive", "-Command", _OUTLOOK_SEND_PS],
+            capture_output=True, text=True, encoding="utf-8", timeout=150, env=env,  # allow the ~60s Outlook-launch poll
+        )
+        out = proc.stdout or ""
+        if "NOOUTLOOK" in out:
+            raise HTTPException(status_code=503, detail="เปิด Outlook (Classic) ไม่ได้ หรือยัง login ไม่เสร็จ — เปิด Outlook ค้างไว้แล้วลองใหม่")
+        if proc.returncode != 0 or "SENT" not in out:
+            detail = (proc.stderr or out).strip() or "ส่งอีเมลผ่าน Outlook ไม่สำเร็จ"
+            raise HTTPException(status_code=502, detail=f"Outlook error: {detail[:600]}")
+        return {"ok": True, "sent": True, "recipients": recipients, "attachments": len(attach_paths)}
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="สั่ง Outlook ใช้เวลานานเกินไป (timeout) — เปิด Outlook ค้างไว้ก่อนลองใหม่")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+@app.get("/api/email-send/health")
+def email_send_health():
+    """Frontend gate. `available` = this host can send (Windows + PowerShell; send can launch
+    Outlook itself). `running` = an Outlook instance is already up. Probes with GetActiveObject
+    only — deliberately does NOT spawn one with New-Object (that would leave a stray hidden
+    Outlook process on every health ping)."""
+    if os.name != "nt" or not _POWERSHELL_BIN:
+        return {"available": False, "running": False}
+    try:
+        proc = subprocess.run(
+            [_POWERSHELL_BIN, "-NoProfile", "-NonInteractive", "-Command",
+             "try { $o = [Runtime.InteropServices.Marshal]::GetActiveObject('Outlook.Application'); Write-Output $o.Version } catch { Write-Output 'NO' }"],
+            capture_output=True, text=True, encoding="utf-8", timeout=15,
+        )
+        ver = (proc.stdout or "").strip()
+        running = ver not in ("", "NO")
+        return {"available": True, "running": running, "version": ver if running else None}
+    except Exception:
+        return {"available": True, "running": False}
