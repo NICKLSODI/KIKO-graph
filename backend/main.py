@@ -36,7 +36,7 @@ YAHOO_RANGE_MAP = {
 
 # Path to the Claude Code CLI. Resolved once at startup.
 CLAUDE_BIN = shutil.which("claude")
-CLAUDE_TIMEOUT_SECONDS = 180
+CLAUDE_TIMEOUT_SECONDS = 300  # image/scanned-PDF path uses Claude's Read tool (agentic loop + cold start) — 180s too tight
 
 # Path to the NotebookLM CLI (`nlm`). Used for term-sheet extraction instead of Claude.
 NLM_BIN = shutil.which("nlm")
@@ -53,10 +53,35 @@ app.add_middleware(
 )
 
 
+# Term sheets name indices the way the desk does ("SPX", "NDX"), but Yahoo only knows their
+# caret tickers — without this map every index-linked note (Sharkfin/Twin Win on SPX) came
+# back "No data for SPX" and got no chart at all.
+INDEX_SYMBOL_MAP = {
+    "SPX": "^GSPC",
+    "SPX500": "^GSPC",
+    "SP500": "^GSPC",
+    "NDX": "^NDX",
+    "NDX100": "^NDX",
+    "NASDAQ100": "^NDX",
+    "DJI": "^DJI",
+    "DJIA": "^DJI",
+    "RUT": "^RUT",
+    "SX5E": "^STOXX50E",
+    "ESTX50": "^STOXX50E",
+    "N225": "^N225",
+    "NKY": "^N225",
+    "HSI": "^HSI",
+    "SET": "^SET.BK",
+    "VIX": "^VIX",
+}
+
+
 @app.get("/candles-yahoo")
 def get_candles_yahoo(symbol: str, interval: str = "1d", market: str = "thai"):
     # Thai stocks need the .BK suffix; foreign (US) tickers are used as-is.
-    if "." in symbol:
+    if symbol.upper() in INDEX_SYMBOL_MAP:
+        yahoo_symbol = INDEX_SYMBOL_MAP[symbol.upper()]
+    elif symbol.startswith("^") or "." in symbol:
         yahoo_symbol = symbol.upper()
     elif market == "foreign":
         yahoo_symbol = symbol.upper()

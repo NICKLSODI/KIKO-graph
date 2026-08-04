@@ -128,7 +128,10 @@ export interface BacktestResult {
   warnings: string[] // non-fatal data-quality issues (e.g. missing fixing date, discarded initial prices)
 }
 
-export type ProfileKey = 'aggressive' | 'balanced' | 'save' | 'custom'
+// 'all' = the dashboard's default neutral view (equal weights). 'balanced' is no longer offered
+// in the dashboard UI, but the PDF/CSV export still scores every product under it for its
+// "best-fit customer" column, so it stays a valid key here.
+export type ProfileKey = 'all' | 'aggressive' | 'balanced' | 'save'
 
 export interface ScoreWeights {
   coupon: number

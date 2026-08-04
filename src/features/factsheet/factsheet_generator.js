@@ -1,7 +1,6 @@
 // InnovestX Simplified Factsheet Generator — Phase-1 Copilot (Output 6). build(product,version,lang)->HTML
 /* eslint-disable */
-import { LOGO } from "./logo.js";
-// detectVariant lives in its own lean module (classify.js) — no LOGO/CSS/REGISTRY —
+// detectVariant lives in its own lean module (classify.js) — no CSS/REGISTRY —
 // so code that only needs classification (extract.ts) doesn't pull this whole render
 // engine into its bundle. Re-exported here so existing `from './factsheet_generator.js'`
 // imports keep working unchanged.
@@ -13,8 +12,7 @@ export const CSS = `<meta charset="UTF-8">
 @media print{html,body{margin:0;padding:0;background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact}.page{margin:0 auto;box-shadow:none}}
 .page{width:794px;min-height:1120px;position:relative;background:#fff;margin:0 auto;padding:14px 38px 46px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;border:none;-webkit-print-color-adjust:exact;print-color-adjust:exact}
 .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;padding-bottom:8px;border-bottom:2px solid #3D2B9E}
-.logo-img{height:42px;width:auto;object-fit:contain;display:block}
-.doc-title{text-align:right}
+.doc-title{text-align:right;margin-left:auto}
 .doc-title h1{font-size:13px;font-weight:600;color:#1a1a1a;line-height:1.5}
 .doc-title p{font-size:10px;color:#888;margin-top:2px}
 .product-tag{display:inline-block;background:#EDE8FC;color:#3D2B9E;font-size:10px;font-weight:600;padding:3px 10px;border-radius:3px;margin-bottom:6px;letter-spacing:0.3px}
@@ -217,7 +215,7 @@ function _headerKH2(p,lang){
   const subdate=(p.subdate&&p.subdate[lang])||'';
   const sub=(subdate?subdate+' &nbsp;|&nbsp; ':'')+LABELS.sub[lang];
   const title=`${(p.title_full&&p.title_full[lang])||p.title[lang]}<br><span style="font-weight:500">${lang==='en'?'Investor Summary — Key Highlight':'สรุปผู้ลงทุน — ฉบับย่อ'}</span>`;
-  return `<div class="header"><div>${LOGO}</div><div class="doc-title"><h1>${title}</h1><p>${sub}</p></div></div>`;
+  return `<div class="header"><div class="doc-title"><h1>${title}</h1><p>${sub}</p></div></div>`;
 }
 
 // BEN With Protection carries a Bonus column in its KH2 basket (added for the KH

@@ -1,5 +1,5 @@
 import { createChart, CandlestickSeries, LineStyle, ColorType, type AutoscaleInfoProvider } from 'lightweight-charts'
-import { koTimesFor, levelsAndMarksFor } from './chartData'
+import { koTimesFor, koScheduleAssumed, levelsAndMarksFor } from './chartData'
 import { backtestDetail } from './engine'
 import { scoreProducts, PROFILE_WEIGHTS, PROFILE_LABELS } from './scoring'
 import type { NoteProduct } from './types'
@@ -99,8 +99,14 @@ function downloadBlob(blob: Blob, filename: string): void {
   const a = document.createElement('a')
   a.href = url
   a.download = filename
+  document.body.appendChild(a)
   a.click()
-  URL.revokeObjectURL(url)
+  a.remove()
+  // Revoke LATER, not synchronously after click(): for a large download (the batch ZIP)
+  // the browser may still be reading the blob URL when click() returns — revoking now
+  // truncates the file mid-write, producing a corrupt archive that fails to open. Keep the
+  // URL alive well past the time it takes to start (and finish) the download.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 
 export function exportCsv(scored: ScoredProduct[]): void {
@@ -224,6 +230,18 @@ function fmt(v: number | null, suffix = '%'): string {
   return v == null ? '-' : `${v}${suffix}`
 }
 
+// Everything the reader needs in order to read the picture correctly: the backtest's own
+// warnings (missing fixing date / mismatched initial prices) plus the assumed-KO-schedule
+// note. The live detail page already shows these; without them on the export, a client-bound
+// image looked as authoritative as one built from a fully dated term sheet.
+function warningsFor(s: DetailProduct): string[] {
+  const out = [...s.backtest.warnings]
+  if (koScheduleAssumed(s.product)) {
+    out.push('เอกสารไม่ระบุวันสังเกตการณ์ KO และวันทำสัญญา — หมุด obs* บนกราฟคำนวณจากสมมติว่าทำสัญญาวันนี้ ตามความถี่ที่เอกสารระบุ')
+  }
+  return out
+}
+
 function factsFor(s: DetailProduct): [string, string][] {
   const p = s.product
   return [
@@ -249,7 +267,7 @@ async function productCardHtml(s: DetailProduct, accent: string): Promise<string
     : (
         await Promise.all(
           bt.series.map(async (ser) => {
-            const { levels, marks } = levelsAndMarksFor(ser, koTimes)
+            const { levels, marks } = levelsAndMarksFor(ser, koTimes, { strikePct: p.strikePct, kiPct: p.kiPct, koPct: p.koPct })
             const img = await renderSeriesImage(ser.candles, levels, marks)
             return `
               <div class="series">
@@ -265,6 +283,8 @@ async function productCardHtml(s: DetailProduct, accent: string): Promise<string
 
   const facts = factsFor(s)
   const factsHtml = facts.map(([k, v]) => `<div class="fact"><span class="fact-k">${k}</span><span class="fact-v">${v}</span></div>`).join('')
+  const warns = warningsFor(s)
+  const warnHtml = warns.length ? `<div class="warn">${warns.map((w) => `<div>⚠ ${w}</div>`).join('')}</div>` : ''
 
   // Client-facing document — the internal rank/score never appears here (CSV keeps it).
   // invxPick is the firm's own recommendation stamp (not an internal metric), so it stays.
@@ -279,6 +299,7 @@ async function productCardHtml(s: DetailProduct, accent: string): Promise<string
         <div class="summary">${p.summary || ''}</div>
       </div>
       <div class="facts">${factsHtml}</div>
+      ${warnHtml}
       <div class="charts">${chartsHtml}</div>
     </section>`
 }
@@ -314,9 +335,10 @@ export async function printProductReport(s: DetailProduct, windowMonths: number)
     .series img{display:block;width:100%}
     .badge-invx{color:#854F0B;background:#FAEEDA;border:1px solid #EF9F27;border-radius:999px;padding:2px 10px;font-size:12.5px;font-weight:600}
     .chart-error{color:#854F0B;font-size:13.5px}
+    .warn{margin:12px 18px 0;padding:10px 12px;border:1px solid #EF9F27;background:#FDF3DE;border-radius:8px;color:#854F0B;font-size:12.5px;line-height:1.6;break-inside:avoid;page-break-inside:avoid}
   </style></head><body>
     <h1>${title}</h1>
-    <div class="sub">แบ็คเทสต์ย้อนหลัง ${windowMonths} เดือน • worst-of ราคาปิดจริง • สร้างเมื่อ ${new Date().toLocaleString('th-TH', { dateStyle: 'long', timeStyle: 'short' })}</div>
+    <div class="sub">แบ็คเทสต์ย้อนหลัง ${windowMonths} เดือน • ราคาปิดจริง • สร้างเมื่อ ${new Date().toLocaleString('th-TH', { dateStyle: 'long', timeStyle: 'short' })}</div>
     ${card}
     <div style="margin-top:20px;padding-top:12px;border-top:1px solid #E2E0D5;font-size:11.5px;color:#6B6A63;line-height:1.6">
       เอกสารนี้จัดทำจากการแบ็คเทสต์ราคาย้อนหลังและข้อมูลที่สกัดจาก Term Sheet โดยอัตโนมัติ เพื่อประกอบการพิจารณาเบื้องต้นเท่านั้น
@@ -400,6 +422,12 @@ function fittedFactValueFont(ctx: CanvasRenderingContext2D, text: string, maxWid
 }
 const F_SERIES_SUB = `19px ${FONT_STACK}`
 const F_FOOTER = `16px ${FONT_STACK}`
+const F_WARN = `18px ${FONT_STACK}`
+const WARN_PAD = 14
+const WARN_LH = 26
+const WARN_BG = '#FDF3DE'
+const WARN_BORDER = '#EF9F27'
+const WARN_TEXT = '#854F0B'
 
 // Human labels for the backtest windows.
 const WINDOW_LABELS: Record<number, string> = { 6: '6 เดือน', 12: '1 ปี', 24: '2 ปี' }
@@ -436,12 +464,12 @@ async function buildProductJpgCanvas(s: DetailProduct, windows: WindowResult[]):
         ? []
         : await Promise.all(
             bt.series.map(async (ser) => {
-              const { levels, marks } = levelsAndMarksFor(ser, koTimes)
+              const { levels, marks } = levelsAndMarksFor(ser, koTimes, { strikePct: p.strikePct, kiPct: p.kiPct, koPct: p.koPct })
               const canvas = await renderSeriesCanvas(ser.candles, levels, marks, JPG_CONTENT_W, chartH, 16)
               return { ser, canvas }
             }),
           )
-      const verdictText = bt.verdict === 'pass' ? 'Historical Pass — ไม่เคยชน KI/KO' : 'Historical Knocked — เคยชน KI/KO'
+      const verdictText = `${bt.verdict === 'pass' ? 'Historical Pass — ไม่เคยชน KI' : 'Historical Knocked — เคยชน KI'}${bt.knockedOut ? ' · KO (autocall)' : ''}`
       return { windowMonths: w.windowMonths, error: bt.error, verdictText, charts }
     }),
   )
@@ -457,6 +485,10 @@ async function buildProductJpgCanvas(s: DetailProduct, windows: WindowResult[]):
   const subLines = wrapText(meas, subtitle, JPG_CONTENT_W)
   meas.font = F_SUMMARY
   const summaryLines = p.summary ? wrapText(meas, p.summary, JPG_CONTENT_W) : []
+  // Amber warning box (same content the live detail page shows) — sits under the facts grid,
+  // above the charts, so the caveats are read before the picture.
+  meas.font = F_WARN
+  const warnLines = warningsFor(s).flatMap((w) => wrapText(meas, `⚠ ${w}`, JPG_CONTENT_W - WARN_PAD * 2))
   meas.font = F_FOOTER
   const footerLines = wrapText(
     meas,
@@ -484,6 +516,8 @@ async function buildProductJpgCanvas(s: DetailProduct, windows: WindowResult[]):
   h += summaryLines.length * SUMMARY_LH + (summaryLines.length ? 12 : 0)
   h += 4 + 16 // accent rule + gap
   h += factRows * FACT_LH + 12
+  const warnBoxH = warnLines.length ? warnLines.length * WARN_LH + WARN_PAD * 2 : 0
+  if (warnBoxH) h += warnBoxH + 14
   for (const sec of sections) {
     h += WINDOW_HEAD_LH
     if (sec.error) h += SUMMARY_LH
@@ -553,6 +587,22 @@ async function buildProductJpgCanvas(s: DetailProduct, windows: WindowResult[]):
   }
   y += 12
 
+  if (warnBoxH) {
+    ctx.fillStyle = WARN_BG
+    ctx.fillRect(JPG_MARGIN, y, JPG_CONTENT_W, warnBoxH)
+    ctx.strokeStyle = WARN_BORDER
+    ctx.lineWidth = 1
+    ctx.strokeRect(JPG_MARGIN + 0.5, y + 0.5, JPG_CONTENT_W - 1, warnBoxH - 1)
+    ctx.font = F_WARN
+    ctx.fillStyle = WARN_TEXT
+    let wy = y + WARN_PAD
+    for (const l of warnLines) {
+      wy += WARN_LH
+      ctx.fillText(l, JPG_MARGIN + WARN_PAD, wy - 7)
+    }
+    y += warnBoxH + 14
+  }
+
   for (const sec of sections) {
     // Window band: label ("ย้อนหลัง 1 ปี") + verdict on a tinted strip.
     y += WINDOW_HEAD_LH
@@ -609,6 +659,10 @@ function canvasToJpgBlob(canvas: HTMLCanvasElement): Promise<Blob | null> {
   return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92))
 }
 
+function canvasToPngBlob(canvas: HTMLCanvasElement): Promise<Blob | null> {
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/png'))
+}
+
 export async function downloadProductJpg(s: DetailProduct, windowMonths: number): Promise<void> {
   const { canvas, title } = await buildProductJpgCanvas(s, [{ windowMonths, backtest: s.backtest }])
   const blob = await canvasToJpgBlob(canvas)
@@ -642,15 +696,19 @@ async function canvasToPdfBlob(canvas: HTMLCanvasElement): Promise<Blob> {
 
 const safeName = (t: string) => t.replace(/[^\w.ก-๙-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'product'
 
-// Every product report shows all three standard backtest windows stacked.
+// Email ranking images cover all three standard backtest windows (short tables — fine stacked).
 export const EXPORT_WINDOWS = [6, 12, 24]
+
+// Per-product PDF/JPG reports render ONLY the 1-year (12-month) chart. Stacking 6M/1Y/2Y made
+// the exported image very tall (N underlyings × 3 windows); one window keeps it readable.
+const REPORT_WINDOWS = [12]
 
 // Backtest one product across all EXPORT_WINDOWS. Prices are cached from the scoring pass,
 // so the extra windows are CPU-only (no extra network) — but each needs its own detail
 // series since candles are cropped per window.
 async function windowsFor(product: DetailProduct['product']): Promise<WindowResult[]> {
   const out: WindowResult[] = []
-  for (const windowMonths of EXPORT_WINDOWS) {
+  for (const windowMonths of REPORT_WINDOWS) {
     out.push({ windowMonths, backtest: await backtestDetail(product, windowMonths) })
   }
   return out
@@ -659,6 +717,9 @@ async function windowsFor(product: DetailProduct['product']): Promise<WindowResu
 // One-click batch export, one folder per product:
 //   summary.csv
 //   01-<product>/<product>.pdf + .jpg + -factsheet-th/en.html
+//   all-images-png/01-<product>.png   ← every product's report image in ONE flat folder,
+//     so it can be multi-selected and dropped straight into a LINE chat without opening
+//     each product folder. Numbered with the same index as the per-product folders.
 // Each product report stacks all three windows (6M / 1Y / 2Y). Factsheets are included
 // only when the real-data mapper succeeds — the illustrative fallback template must never
 // land in a client-bound zip unnoticed.
@@ -679,16 +740,22 @@ export async function buildBatchZipBlob(
   const zip = new JSZip()
   const ordered = orderForExport(list)
   zip.file('summary.csv', csvText(ordered))
+  // Flat "send to LINE" folder — written per product inside the loop (not from a kept array
+  // of canvases, which would hold ~17MB of pixels per product in memory).
+  const pngFolder = zip.folder('all-images-png')!
   let done = 0
   for (const s of ordered) {
     onProgress?.(done, ordered.length)
     const windows = await windowsFor(s.product)
     const { canvas, title } = await buildProductJpgCanvas(s, windows)
     const name = safeName(title)
-    const folder = zip.folder(`${String(done + 1).padStart(2, '0')}-${name}`)!
+    const index = String(done + 1).padStart(2, '0')
+    const folder = zip.folder(`${index}-${name}`)!
     const jpg = await canvasToJpgBlob(canvas)
     if (jpg) folder.file(`${name}.jpg`, jpg)
     folder.file(`${name}.pdf`, await canvasToPdfBlob(canvas))
+    const png = await canvasToPngBlob(canvas)
+    if (png) pngFolder.file(`${index}-${name}.png`, png)
 
     // Factsheet with Spot = latest close per underlying (same data the dashboard button
     // passes to the factsheet screen). No notional in batch mode — no shares column.

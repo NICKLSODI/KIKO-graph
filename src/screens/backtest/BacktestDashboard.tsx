@@ -1,22 +1,22 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { C } from '../../theme'
 import { Screen, Card, NavBtn, IconOptions } from '../../ui/components'
-import { IconUpload, IconSearch, IconBarChart, IconTrophy, IconChevronRight, IconFileText, IconLink, IconAlignLeft, IconCheck } from '../../ui/icons'
+import { IconUpload, IconSearch, IconBarChart, IconTrophy, IconChevronRight, IconFileText, IconAlignLeft, IconCheck, IconMail } from '../../ui/icons'
 import { CandleChart } from '../../components/CandleChart'
 import type { GenerateFile } from '../../api/generate'
-import { extractNote, extractNotesFromTextChunked, type NoteSource } from '../../features/backtest/extract'
+import { extractNotesFromSource, type NoteSource } from '../../features/backtest/extract'
 import { koTimesFor, levelsAndMarksFor } from '../../features/backtest/chartData'
 import type { InputMode } from '../../types'
 import { backtestScore, backtestDetail } from '../../features/backtest/engine'
-import { scoreProducts, weightsFor, PROFILE_LABELS, DEFAULT_CUSTOM_WEIGHTS } from '../../features/backtest/scoring'
+import { scoreProducts, weightsFor, PROFILE_LABELS } from '../../features/backtest/scoring'
 import { exportBatchZip, buildBatchZipBlob, captureRankingImages, sendEmailNow, rankingImageFilename, EXPORT_WINDOWS, printProductReport, downloadProductJpg, type WindowItems } from '../../features/backtest/exportReport'
-import type { BacktestResult, DetailProduct, NoteProduct, ProfileKey, ScoredProduct, ScoreWeights } from '../../features/backtest/types'
+import type { BacktestResult, DetailProduct, NoteProduct, ProfileKey, ScoredProduct } from '../../features/backtest/types'
 import { STRUCTURE_TYPE_LABELS, koObservationLabel, kiObservationLabel } from '../../features/backtest/types'
 import type { RetrievedProductData } from '../../features/ingest/ingest'
 import type { Patch } from '../../store'
 
 type Phase = 'upload' | 'running' | 'dashboard'
-type SortKey = 'rank' | 'coupon' | 'buffer' | 'vol' | 'tenor'
+type SortKey = 'rank' | 'coupon' | 'strike' | 'ki' | 'ko' | 'vol' | 'tenor'
 
 interface Item {
   product: NoteProduct
@@ -149,8 +149,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   const [phase, setPhase] = useState<Phase>(RESUME ? 'dashboard' : 'upload')
   const [dragging, setDragging] = useState(false)
   const [sources, setSources] = useState<NoteSource[]>([])
-  const [addMode, setAddMode] = useState<InputMode>('file')
-  const [linkDraft, setLinkDraft] = useState('')
+  const [addMode, setAddMode] = useState<InputMode>('text')
   const [textDraft, setTextDraft] = useState('')
   const [progress, setProgress] = useState('')
   const [errors, setErrors] = useState<string[]>([])
@@ -176,9 +175,9 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   const [savedSession, setSavedSession] = useState<{ prods: NoteProduct[]; wm: number } | null>(() => loadSession())
 
   const [view, setView] = useState<'summary' | 'detail'>(RESUME?.view ?? 'summary')
-  const [profile, setProfile] = useState<ProfileKey>('balanced')
-  const [custom, setCustom] = useState<ScoreWeights>(DEFAULT_CUSTOM_WEIGHTS)
-  const [sortKey, setSortKey] = useState<SortKey>('rank')
+  const [profile, setProfile] = useState<ProfileKey>('all')
+  // Default order: lowest KI% first (safest), Strike% as tiebreak — what the desk scans for.
+  const [sortKey, setSortKey] = useState<SortKey>('ki')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
   const [selectedId, setSelectedId] = useState<string | null>(RESUME?.selectedId ?? null)
   // Lifted so the factsheet button (in the detail toolbar) can carry it to the store.
@@ -199,7 +198,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   // just listed without a rank.
   const kikoItems = useMemo(() => items.filter((i) => i.product.structureType === 'kiko'), [items])
   const otherItems = useMemo(() => items.filter((i) => i.product.structureType !== 'kiko'), [items])
-  const scored = useMemo(() => scoreProducts(kikoItems, weightsFor(profile, custom)), [kikoItems, profile, custom])
+  const scored = useMemo(() => scoreProducts(kikoItems, weightsFor(profile)), [kikoItems, profile])
   const selected: DetailProduct | null =
     scored.find((s) => s.product.id === selectedId) ??
     (() => {
@@ -252,19 +251,16 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   }
 
   async function run() {
-    // Drafts still sitting in the text/link inputs count automatically — pasting a
+    // A draft still sitting in the text input counts automatically — pasting a
     // summary and hitting เริ่มวิเคราะห์ works without the "+ เพิ่มข้อความ" step.
     const pending: NoteSource[] = []
     const text = textDraft.trim()
     if (text) pending.push({ kind: 'text', text, label: `ข้อความ #${sources.filter((s) => s.kind === 'text').length + 1}` })
-    const link = linkDraft.trim()
-    if (link) pending.push({ kind: 'link', link, label: link })
     const all = [...sources, ...pending]
     if (all.length === 0) return
     if (pending.length) {
       setSources(all)
       setTextDraft('')
-      setLinkDraft('')
     }
 
     setPhase('running')
@@ -286,15 +282,13 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
         const i = started++
         const source = all[i]
         try {
-          if (source.kind === 'text') {
-            // Large desk listings are split into small chunks + extracted concurrently so a
-            // 30-product paste doesn't hit the 180s single-call timeout.
-            results[i] = await extractNotesFromTextChunked(source.text, source.label, () => crypto.randomUUID())
-          } else {
-            const id = crypto.randomUUID()
-            results[i] = [await extractNote(source, id)]
-            if (source.kind === 'file') nextFileById[id] = source.file
-          }
+          // One source can hold MANY products: a pasted desk listing (chunked internally),
+          // or a single term-sheet file/link whose table has several baskets (one per row).
+          const prods = await extractNotesFromSource(source, () => crypto.randomUUID(), (msg) => errs.push(msg))
+          results[i] = prods
+          // Map every product from this file back to it, so each basket can re-generate its
+          // factsheet later from the same upload.
+          if (source.kind === 'file') for (const p of prods) nextFileById[p.id] = source.file
         } catch (err) {
           errs.push(err instanceof Error ? err.message : String(err))
         }
@@ -330,13 +324,6 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     readFiles(fileList).then((files) => {
       setSources((prev) => [...prev, ...files.map((file): NoteSource => ({ kind: 'file', file, label: file.name }))])
     })
-  }
-
-  function addLinkSource() {
-    const link = linkDraft.trim()
-    if (!link) return
-    setSources((prev) => [...prev, { kind: 'link', link, label: link }])
-    setLinkDraft('')
   }
 
   function removeSource(i: number) {
@@ -405,6 +392,10 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
       setEmailing('กำลังส่งผ่าน Outlook...')
       const today = new Date().toLocaleDateString('th-TH', { dateStyle: 'long' })
       const subject = `SN·Desk — สรุปและจัดอันดับตราสารโครงสร้าง ${today}`
+      // If the batch was built from pasted text (a desk listing), include that raw source
+      // verbatim in the body so recipients see the original message the ranking came from.
+      const escapeHtml = (s: string) => s.replace(/[&<>]/g, (c) => (c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;'))
+      const sourceText = sources.filter((s) => s.kind === 'text').map((s) => s.text.trim()).filter(Boolean).join('\n\n──────────\n\n')
       const bodyHtml = [
         `<p>เรียนทีมงาน,</p>`,
         `<p>แนบสรุปและจัดอันดับ KIKO ประจำวันที่ ${today}</p>`,
@@ -412,7 +403,11 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
         `<li>รูป ranking ย้อนหลัง 6 เดือน / 1 ปี / 2 ปี (แต่ละรูปมีตาราง Aggressive / Balanced / Save)</li>`,
         `<li>ไฟล์ ZIP: รายงานราย product (PDF + รูป + factsheet) และตารางสรุป CSV</li>`,
         `</ul>`,
-        `<p style="color:#888;font-size:12px">อีเมลนี้สร้างและส่งอัตโนมัติจาก SN·Desk</p>`,
+        ...(sourceText ? [
+          `<p style="font-weight:600;margin:16px 0 6px">ข้อมูลตั้งต้น (ข้อความที่สกัด):</p>`,
+          `<pre style="white-space:pre-wrap;font-family:inherit;background:#f5f5f7;border:1px solid #e0e0e5;border-radius:8px;padding:12px;font-size:13px;color:#222;margin:0">${escapeHtml(sourceText)}</pre>`,
+        ] : []),
+        `<p style="color:#888;font-size:12px;margin-top:16px">อีเมลนี้สร้างและส่งอัตโนมัติจาก SN·Desk</p>`,
       ].join('')
       const d = new Date()
       const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
@@ -420,8 +415,27 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
         ...images.map((im) => ({ filename: rankingImageFilename(im.windowMonths), blob: im.blob })),
         { filename: `SN-Desk-batch-${stamp}.zip`, blob: zipBlob },
       ]
-      const result = await sendEmailNow(recips, subject, bodyHtml, attachments)
-      setEmailDone(`✅ ส่งอีเมลแล้ว (${result.recipients.length} คน, ไฟล์แนบ ${result.attachments} รายการ) ผ่าน Outlook`)
+      // Outlook may not be ready on the first try (still launching / mid-login) — the backend
+      // returns the "เปิด Outlook ไม่ได้ หรือ login ไม่เสร็จ" 503 in that case. Auto-retry the
+      // send a few times (attachments are already built, so a retry is cheap) instead of
+      // making the user re-run the whole capture+zip flow.
+      let result: { recipients: string[]; attachments: number } | null = null
+      const MAX_TRIES = 3
+      for (let attempt = 1; ; attempt++) {
+        try {
+          if (attempt > 1) setEmailing(`Outlook ยังไม่พร้อม — ลองส่งใหม่ครั้งที่ ${attempt}/${MAX_TRIES}...`)
+          result = await sendEmailNow(recips, subject, bodyHtml, attachments)
+          break
+        } catch (err) {
+          const notReady = err instanceof Error && (err.message.includes('เปิด Outlook') || err.message.includes('login ไม่เสร็จ'))
+          if (notReady && attempt < MAX_TRIES) {
+            await new Promise((r) => setTimeout(r, 5000))
+            continue
+          }
+          throw err
+        }
+      }
+      setEmailDone(`✅ ส่งอีเมลแล้ว (${result!.recipients.length} คน, ไฟล์แนบ ${result!.attachments} รายการ) ผ่าน Outlook`)
     } catch (err) {
       setErrors((prev) => [...prev, `ส่งอีเมลไม่สำเร็จ: ${err instanceof Error ? err.message : String(err)}`])
     } finally {
@@ -449,7 +463,9 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
     else {
       setSortKey(key)
-      setSortDir(key === 'rank' ? 'asc' : 'desc')
+      // Coupon: higher is better → default desc. Everything else (rank/ki/ko/strike/vol/tenor):
+      // lower is better/safer → default asc.
+      setSortDir(key === 'coupon' ? 'desc' : 'asc')
     }
   }
 
@@ -458,12 +474,21 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
       switch (sortKey) {
         case 'rank': return s.rank
         case 'coupon': return s.product.couponPa ?? -Infinity
-        case 'buffer': return s.backtest.bufferPct ?? -Infinity
+        case 'strike': return s.product.strikePct ?? Infinity
+        case 'ki': return s.product.kiPct ?? Infinity
+        case 'ko': return s.product.koPct ?? Infinity
         case 'vol': return s.backtest.volatilityPct ?? Infinity
         case 'tenor': return s.product.tenorMonths ?? Infinity
       }
     }
-    return [...group].sort((a, b) => (sortDir === 'asc' ? val(a) - val(b) : val(b) - val(a)))
+    return [...group].sort((a, b) => {
+      const d = sortDir === 'asc' ? val(a) - val(b) : val(b) - val(a)
+      if (d !== 0) return d
+      // Stable tiebreak = the desk's default preference: lowest KI% then lowest Strike%.
+      const ki = (a.product.kiPct ?? Infinity) - (b.product.kiPct ?? Infinity)
+      if (ki !== 0) return ki
+      return (a.product.strikePct ?? Infinity) - (b.product.strikePct ?? Infinity)
+    })
   }
 
   // Commit one or more typed terms (comma-separated) into filter chips — uppercased,
@@ -511,9 +536,8 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
                 onChange={(v) => setAddMode(v as InputMode)}
                 minWidth={150}
                 options={[
-                  { value: 'file', icon: <IconFileText size={19} />, label: 'ไฟล์เอกสาร', sub: 'PDF / รูปภาพ' },
-                  { value: 'link', icon: <IconLink size={19} />, label: 'ลิงก์อ้างอิง', sub: 'Web URL' },
                   { value: 'text', icon: <IconAlignLeft size={19} />, label: 'ข้อความสรุป', sub: 'วางจากอีเมล / แชท' },
+                  { value: 'file', icon: <IconFileText size={19} />, label: 'ไฟล์เอกสาร', sub: 'PDF / รูปภาพ' },
                 ]}
               />
 
@@ -540,18 +564,6 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
                     <span style={{ fontSize: 12, color: C.muted }}>PDF, PNG, JPG — เลือกได้หลายไฟล์พร้อมกัน</span>
                     <input type="file" accept=".pdf,.png,.jpg,.jpeg,.webp" multiple style={{ display: 'none' }} onChange={(e) => { if (e.target.files?.length) addFileSources(e.target.files) }} />
                   </label>
-                )}
-                {addMode === 'link' && (
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <input
-                      value={linkDraft}
-                      onChange={(e) => setLinkDraft(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') addLinkSource() }}
-                      placeholder="https://..."
-                      style={{ flex: 1, padding: '12px 14px', borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 14, boxSizing: 'border-box' }}
-                    />
-                    <button className="btn-ghost" onClick={addLinkSource} disabled={!linkDraft.trim()} style={{ padding: '0 16px', borderRadius: 10, border: `1px solid ${C.primaryBorder}`, background: C.primaryLight, color: C.primary, fontSize: 13.5, cursor: 'pointer' }}>+ เพิ่มลิงก์</button>
-                  </div>
                 )}
                 {addMode === 'text' && (
                   <div>
@@ -583,10 +595,10 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
               )}
 
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 12, marginTop: 20 }}>
-                <NavBtn onClick={run} disabled={sources.length + (textDraft.trim() ? 1 : 0) + (linkDraft.trim() ? 1 : 0) === 0}>
+                <NavBtn onClick={run} disabled={sources.length + (textDraft.trim() ? 1 : 0) === 0}>
                   {(() => {
-                    // Pending drafts count toward the total so the button reflects what run() will do.
-                    const n = sources.length + (textDraft.trim() ? 1 : 0) + (linkDraft.trim() ? 1 : 0)
+                    // The pending text draft counts toward the total so the button reflects what run() will do.
+                    const n = sources.length + (textDraft.trim() ? 1 : 0)
                     return n ? `เริ่มวิเคราะห์ ${n} รายการ →` : 'เพิ่มข้อมูลก่อน'
                   })()}
                 </NavBtn>
@@ -620,11 +632,24 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
 
   const th = { padding: '10px 12px', fontSize: 12, fontWeight: 600, color: C.muted, textAlign: 'left' as const, whiteSpace: 'nowrap' as const }
   const td = { padding: '10px 12px', fontSize: 13.5, color: C.text, borderTop: `1px solid ${C.border}` }
-  const sortableTh = (label: string, key: SortKey) => (
-    <th style={{ ...th, cursor: 'pointer' }} onClick={() => toggleSort(key)}>
-      {label} {sortKey === key ? (sortDir === 'asc' ? '▲' : '▼') : ''}
-    </th>
-  )
+  // Every sortable header carries a dotted underline + a ⇅ glyph (▲/▼ when active) so it's
+  // obvious it can be clicked, without having to guess-and-click first.
+  const sortableTh = (label: string, key: SortKey) => {
+    const active = sortKey === key
+    return (
+      <th
+        style={{ ...th, cursor: 'pointer', userSelect: 'none', color: active ? C.primary : C.muted, textDecoration: 'underline dotted', textUnderlineOffset: 3 }}
+        onClick={() => toggleSort(key)}
+        title="คลิกเพื่อจัดเรียง"
+      >
+        {label} <span style={{ fontSize: 10, opacity: active ? 1 : 0.45 }}>{active ? (sortDir === 'asc' ? '▲' : '▼') : '⇅'}</span>
+      </th>
+    )
+  }
+  // Colour cues for the desk: a low Strike (deep discount) and a low KI (safer barrier) are
+  // the "good" rows to spot fast.
+  const strikeStyle = (v: number | null) => (v != null && v <= 90 ? { color: C.teal, fontWeight: 700 } : {})
+  const kiCellStyle = (v: number | null) => (v != null && v < 60 ? { color: C.teal, fontWeight: 700, background: C.tealLight } : {})
 
   function renderTable(group: ScoredProduct[], accent: string) {
     if (group.length === 0) return <div style={{ fontSize: 13, color: C.muted, padding: '8px 12px' }}>— ไม่มีรายการ —</div>
@@ -637,12 +662,12 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
               <th style={th}>Product</th>
               <th style={th}>Underlying</th>
               {sortableTh('Coupon', 'coupon')}
-              <th style={th}>KI / KO</th>
-              {sortableTh('Buffer', 'buffer')}
-              {sortableTh('Vol', 'vol')}
+              {sortableTh('Strike', 'strike')}
+              {sortableTh('KI', 'ki')}
+              {sortableTh('KO', 'ko')}
               {sortableTh('Tenor', 'tenor')}
               <th style={th}>Issuer</th>
-              <th style={th}>Score</th>
+              {profile !== 'all' && <th style={th}>Score</th>}
               <th style={th}></th>
             </tr>
           </thead>
@@ -668,12 +693,12 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
                       })}
                 </td>
                 <td className="num" style={{ ...td, color: accent, fontWeight: 600 }}>{fmtPct(s.product.couponPa)}</td>
-                <td className="num" style={td}>{kiko(s.product)}</td>
-                <td className="num" style={td}>{s.backtest.bufferPct == null ? '-' : `${s.backtest.bufferPct}%`}</td>
-                <td className="num" style={td}>{s.backtest.volatilityPct == null ? '-' : `${s.backtest.volatilityPct}%`}</td>
+                <td className="num" style={{ ...td, ...strikeStyle(s.product.strikePct) }}>{fmtPct(s.product.strikePct)}</td>
+                <td className="num" style={{ ...td, ...kiCellStyle(s.product.kiPct) }}>{fmtPct(s.product.kiPct)}</td>
+                <td className="num" style={td}>{fmtPct(s.product.koPct)}</td>
                 <td className="num" style={td}>{s.product.tenor ?? '-'}</td>
                 <td style={td}>{s.product.issuer ?? '-'}</td>
-                <td className="num" style={{ ...td, fontWeight: 600 }}>{s.score}</td>
+                {profile !== 'all' && <td className="num" style={{ ...td, fontWeight: 600 }}>{s.score}</td>}
                 <td style={{ ...td, display: 'flex', gap: 6 }}>
                   <button className="btn-ghost" onClick={() => viewDetail(s.product.id)} style={{ padding: '5px 12px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.primary, fontSize: 12.5, cursor: 'pointer' }}>ดูรายละเอียด →</button>
                   {fileById[s.product.id] && (
@@ -771,7 +796,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
               </select>
             </div>
           </div>
-          <DetailGraphView key={selected?.product.id ?? 'none'} selected={selected} hasFile={!!(selected && fileById[selected.product.id])} onPreview={() => selected && openPreview(selected.product.id)} notional={notional} setNotional={setNotional} isLoadingChart={loadingChartId === selected?.product.id} />
+          <DetailGraphView key={selected?.product.id ?? 'none'} selected={selected} showScore={profile !== 'all'} hasFile={!!(selected && fileById[selected.product.id])} onPreview={() => selected && openPreview(selected.product.id)} notional={notional} setNotional={setNotional} isLoadingChart={loadingChartId === selected?.product.id} />
         </Card>
 
         {preview && (
@@ -821,13 +846,18 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
               {zipping ?? '⬇ ZIP ทั้งหมด'}
             </button>
             <button
-              className="btn-ghost"
               onClick={() => setEmailOpen((v) => !v)}
               disabled={items.length === 0}
               title="แคปหน้า ranking (6M/1Y/2Y) + ZIP แล้วส่งอีเมลอัตโนมัติผ่าน Outlook (แนบไฟล์ครบ)"
-              style={{ padding: '7px 14px', borderRadius: 8, border: `1px solid ${emailOpen ? C.primaryBorder : C.border}`, background: emailOpen ? C.primaryLight : C.white, color: emailOpen ? C.primary : C.text, fontSize: 12.5, cursor: 'pointer' }}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 7, padding: '9px 18px', borderRadius: 8,
+                border: `1px solid ${C.primary}`, background: C.primary, color: C.onPrimary,
+                fontSize: 13, fontWeight: 700, cursor: items.length === 0 ? 'not-allowed' : 'pointer',
+                opacity: items.length === 0 ? 0.5 : 1,
+                boxShadow: emailOpen ? `0 0 0 3px ${C.primaryLight}` : '0 1px 3px rgba(0,0,0,0.18)',
+              }}
             >
-              ✉ ส่งอีเมล
+              <IconMail size={15} />ส่งอีเมล
             </button>
             <button
               className="btn-ghost"
@@ -878,12 +908,12 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
           <div className="tile">
             <div className="k">Historical Pass (KIKO)</div>
             <div className="v" style={{ color: 'var(--c-teal)' }}>{passGroup.length}</div>
-            <div className="s">ไม่เคยชน KI/KO</div>
+            <div className="s">ไม่เคยชน KI</div>
           </div>
           <div className="tile">
             <div className="k">Historical Knocked (KIKO)</div>
             <div className="v" style={{ color: 'var(--c-coral)' }}>{knockedGroup.length}</div>
-            <div className="s">เคยชน KI/KO ในช่วงที่ดู</div>
+            <div className="s">เคยชน KI ในช่วงที่ดู</div>
           </div>
           <div className="tile">
             <div className="k">อันดับ 1 (Pass)</div>
@@ -894,7 +924,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
 
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8, alignItems: 'center' }}>
           <span className="overline" style={{ marginRight: 4 }}>โปรไฟล์คะแนน</span>
-          {(['aggressive', 'balanced', 'save', 'custom'] as ProfileKey[]).map((p) => {
+          {(['all', 'aggressive', 'save'] as ProfileKey[]).map((p) => {
             const sel = profile === p
             return (
               <button key={p} className="btn-ghost" aria-pressed={sel} onClick={() => setProfile(p)} style={{ padding: '6px 13px', borderRadius: 999, fontSize: 12.5, cursor: 'pointer', border: `1px solid ${sel ? C.primary : C.border}`, background: sel ? C.primary : C.white, color: sel ? C.onPrimary : C.text, fontWeight: sel ? 600 : 400 }}>
@@ -903,20 +933,9 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
             )
           })}
         </div>
-        {profile === 'custom' && (
-          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12, fontSize: 12.5, color: C.muted, alignItems: 'center' }}>
-            {(['coupon', 'buffer', 'tenor', 'volatility'] as const).map((k) => (
-              <label key={k} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                {k}
-                <input type="number" value={custom[k]} min={0} step={0.1} onChange={(e) => setCustom((w) => ({ ...w, [k]: Number(e.target.value) }))} style={{ width: 60, padding: '4px 6px', borderRadius: 6, border: `1px solid ${C.border}` }} />
-              </label>
-            ))}
-          </div>
-        )}
-
         {errors.length > 0 && (
           <div style={{ fontSize: 12.5, color: C.amber, background: C.amberLight, border: `1px solid ${C.amberBorder}`, borderRadius: 8, padding: '8px 12px', margin: '4px 0 12px' }}>
-            {errors.length} ไฟล์สกัดไม่สำเร็จ: {errors.join(' | ')}
+            พบปัญหาในการสกัดข้อมูล {errors.length} รายการ: {errors.join(' | ')}
           </div>
         )}
 
@@ -957,17 +976,17 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '10px 0 8px' }}>
           <span className="badge pass">Historical Pass</span>
-          <span style={{ fontSize: 12.5, color: C.muted }}>{passShown.length} รายการ — ไม่เคยชน KI/KO</span>
+          <span style={{ fontSize: 12.5, color: C.muted }}>{passShown.length} รายการ — ไม่เคยชน KI</span>
         </div>
         {renderTable(passShown, C.teal)}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '20px 0 8px' }}>
           <span className="badge knock">Historical Knocked</span>
-          <span style={{ fontSize: 12.5, color: C.muted }}>{knockedShown.length} รายการ — เคยชน KI/KO</span>
+          <span style={{ fontSize: 12.5, color: C.muted }}>{knockedShown.length} รายการ — เคยชน KI</span>
         </div>
         {renderTable(knockedShown, C.coral)}
 
         <div style={{ fontSize: 11.5, color: C.muted, marginTop: 16, lineHeight: 1.6 }}>
-          Buffer = ระยะ % ของหุ้นอ่อนสุดจากระดับ KI ปัจจุบัน • Vol = ความผันผวนต่อปีของหุ้นที่ผันผวนสุด • เฉพาะวันสังเกตการณ์ KO ที่ผ่านมาแล้วเท่านั้นที่ถูกนำมาตัดสิน
+          คลิกหัวคอลัมน์ที่มีขีดเส้นใต้ (⇅) เพื่อจัดเรียง • เริ่มต้นเรียงตาม KI ต่ำสุด แล้ว Strike ต่ำสุด • <span style={{ color: C.teal, fontWeight: 700 }}>สีเขียว</span> = Strike ≤ 90% หรือ KI &lt; 60% (ยิ่งต่ำยิ่งปลอดภัย) • เฉพาะวันสังเกตการณ์ KO ที่ผ่านมาแล้วเท่านั้นที่ถูกนำมาตัดสิน
         </div>
       </Card>
 
@@ -992,7 +1011,6 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
                     <th style={th}>Underlying</th>
                     <th style={th}>Coupon</th>
                     <th style={th}>KI / KO</th>
-                    <th style={th}>Buffer</th>
                     <th style={th}>Vol</th>
                     <th style={th}>Tenor</th>
                     <th style={th}>Issuer</th>
@@ -1011,7 +1029,6 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
                       <td style={td}>{it.product.underlyings.join(', ') || '-'}</td>
                       <td className="num" style={td}>{fmtPct(it.product.couponPa)}</td>
                       <td className="num" style={td}>{kiko(it.product)}</td>
-                      <td className="num" style={td}>{it.backtest.bufferPct == null ? '-' : `${it.backtest.bufferPct}%`}</td>
                       <td className="num" style={td}>{it.backtest.volatilityPct == null ? '-' : `${it.backtest.volatilityPct}%`}</td>
                       <td className="num" style={td}>{it.product.tenor ?? '-'}</td>
                       <td style={td}>{it.product.issuer ?? '-'}</td>
@@ -1055,7 +1072,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   )
 }
 
-function DetailGraphView({ selected, hasFile, onPreview, notional, setNotional, isLoadingChart }: { selected: DetailProduct | null; hasFile: boolean; onPreview: () => void; notional: string; setNotional: (v: string) => void; isLoadingChart: boolean }) {
+function DetailGraphView({ selected, showScore, hasFile, onPreview, notional, setNotional, isLoadingChart }: { selected: DetailProduct | null; showScore: boolean; hasFile: boolean; onPreview: () => void; notional: string; setNotional: (v: string) => void; isLoadingChart: boolean }) {
   if (!selected) {
     return (
       <div style={{ textAlign: 'center', padding: '36px 0', color: C.muted }}>
@@ -1099,6 +1116,28 @@ function DetailGraphView({ selected, hasFile, onPreview, notional, setNotional, 
   const ulTh = { padding: '9px 10px', fontSize: 11.5, fontWeight: 700, color: C.onPrimary, textAlign: 'left' as const, whiteSpace: 'nowrap' as const, background: C.primary }
   const ulTd = { padding: '9px 10px', fontSize: 13, color: C.text, whiteSpace: 'nowrap' as const }
 
+  const vf = p.variantFields
+  const hasKi = p.kiPct != null
+  // Twin Win / dual-barrier: no single koPct, but an Upper/Lower KO pair from variantFields.
+  const koPair = p.koPct == null && !!(vf?.upperKO || vf?.lowerKO)
+  // Structure-specific terms present in the doc but not covered by the KIKO fields above —
+  // rendered only when non-null, so a Sharkfin shows PR/Min Redemption and a Twin Win shows
+  // Upper/Lower KO, without leaving empty rows on a plain KIKO.
+  const extraTerms: [string, string | null][] = [
+    ['Participation Rate', vf?.participation ?? null],
+    ['Upper KO', vf?.upperKO ?? null],
+    ['Lower KO', vf?.lowerKO ?? null],
+    ['KO Barrier', p.koPct == null ? (vf?.ko ?? null) : null],
+    ['Knock-In', hasKi ? null : (vf?.knockIn ?? null)],
+    ['Min Redemption Level', vf?.minRedemption ?? null],
+    ['Coupon Barrier', vf?.couponBarrier ?? null],
+    ['Bonus Coupon', vf?.bonus ?? null],
+    ['KO Rebate', vf?.koRebate ?? null],
+    ['Minimum Coupon', vf?.minCoupon ?? null],
+    ['Settlement', vf?.settlement === 'cash' ? 'Cash' : vf?.settlement === 'physical' ? 'Physical' : null],
+    ['Redemption upon', vf?.redemptionUpon ?? null],
+  ]
+
   return (
     <div>
       {/* Header: name + status + score */}
@@ -1109,17 +1148,17 @@ function DetailGraphView({ selected, hasFile, onPreview, notional, setNotional, 
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
             {p.invxPick && <span className="badge invx" title="ผลิตภัณฑ์ที่ INVX แนะนำ">💎 INVX Pick</span>}
             <span className={`badge ${bt.verdict === 'pass' ? 'pass' : 'knock'}`}>
-              {bt.verdict === 'pass' ? 'Historical Pass' : `Knocked${bt.knockedIn ? ' · KI' : ''}${bt.knockedOut ? ' · KO' : ''}`}
+              {bt.verdict === 'pass' ? 'Historical Pass' : 'Historical Knocked · KI'}
             </span>
             <span className="badge plain">{STRUCTURE_TYPE_LABELS[p.structureType]}</span>
-            <span className="badge plain">KO: {koObservationLabel(p)}</span>
+            <span className="badge plain">KO: {vf?.koObservation ?? koObservationLabel(p)}</span>
             <span className="badge plain">{p.market === 'thai' ? 'หุ้นไทย' : 'ต่างประเทศ'}</span>
             {hasFile && (
               <button className="btn-ghost" onClick={onPreview} style={{ padding: '3px 10px', borderRadius: 999, border: `1px solid ${C.border}`, background: C.white, color: C.muted, fontSize: 11.5, cursor: 'pointer' }}>เปิดไฟล์ต้นฉบับ</button>
             )}
           </div>
         </div>
-        {selected.score != null && (
+        {selected.score != null && showScore && (
           <div style={{ textAlign: 'center', padding: '12px 22px', borderRadius: 10, border: `1px solid ${C.tealBorder}`, background: C.tealLight, alignSelf: 'flex-start' }}>
             <div className="overline" style={{ color: C.teal }}>คะแนนรวม</div>
             <div className="num" style={{ fontSize: 34, fontWeight: 600, color: C.teal, lineHeight: 1.15 }}>{selected.score}</div>
@@ -1128,23 +1167,43 @@ function DetailGraphView({ selected, hasFile, onPreview, notional, setNotional, 
         )}
       </div>
 
-      {/* Key metrics strip */}
+      {/* Key metrics strip — structure-aware: KI + Buffer only when the note has a KI barrier;
+          KO shows a single level or an Upper/Lower pair; Participation appears for PR structures
+          (Sharkfin/Booster). */}
       <div className="tiles" style={{ margin: '16px 0 4px' }}>
         <div className="tile">
           <div className="k">Coupon (p.a.)</div>
           <div className="v">{fmtPct(p.couponPa)}</div>
           <div className="s">ดอกเบี้ยต่อปี</div>
         </div>
-        <div className="tile">
-          <div className="k">KI / KO</div>
-          <div className="v" style={{ fontSize: 18 }}>{kiko(p)}</div>
-          <div className="s">% ของราคาเริ่มต้น</div>
-        </div>
-        <div className="tile">
-          <div className="k">Buffer จาก KI</div>
-          <div className="v" style={{ color: bt.bufferPct != null && bt.bufferPct < 10 ? 'var(--c-coral)' : 'var(--c-teal)' }}>{bt.bufferPct == null ? '–' : `${bt.bufferPct}%`}</div>
-          <div className="s">หุ้นอ่อนสุด ณ ปัจจุบัน</div>
-        </div>
+        {hasKi && (
+          <div className="tile">
+            <div className="k">Knock-In</div>
+            <div className="v">{fmtPct(p.kiPct)}</div>
+            <div className="s">% ของราคาเริ่มต้น</div>
+          </div>
+        )}
+        {(p.koPct != null || koPair) && (
+          <div className="tile">
+            <div className="k">{koPair ? 'Upper / Lower KO' : 'Knock-Out'}</div>
+            <div className="v" style={{ fontSize: koPair ? 16 : undefined }}>{koPair ? `${vf?.upperKO ?? '–'} / ${vf?.lowerKO ?? '–'}` : fmtPct(p.koPct)}</div>
+            <div className="s">% ของราคาเริ่มต้น</div>
+          </div>
+        )}
+        {hasKi && (
+          <div className="tile">
+            <div className="k">Buffer จาก KI</div>
+            <div className="v" style={{ color: bt.bufferPct != null && bt.bufferPct < 10 ? 'var(--c-coral)' : 'var(--c-teal)' }}>{bt.bufferPct == null ? '–' : `${bt.bufferPct}%`}</div>
+            <div className="s">หุ้นอ่อนสุด ณ ปัจจุบัน</div>
+          </div>
+        )}
+        {vf?.participation && (
+          <div className="tile">
+            <div className="k">Participation</div>
+            <div className="v">{vf.participation}</div>
+            <div className="s">อัตราการมีส่วนร่วม</div>
+          </div>
+        )}
         <div className="tile">
           <div className="k">Volatility</div>
           <div className="v">{bt.volatilityPct == null ? '–' : `${bt.volatilityPct}%`}</div>
@@ -1157,11 +1216,12 @@ function DetailGraphView({ selected, hasFile, onPreview, notional, setNotional, 
       <div className="fact-grid">
         {fact('ผู้ออก (Issuer)', p.issuer ?? '-')}
         {fact('หุ้นอ้างอิง', p.underlyings.join(', ') || '-')}
-        {fact('Strike', fmtPct(p.strikePct), true)}
+        {p.strikePct != null && fact('Strike', fmtPct(p.strikePct), true)}
         {fact('อายุสัญญา (Tenor)', p.tenor ?? '-', true)}
         {fact('วันทำสัญญา (Fixing)', p.fixingDate ?? '-', true)}
-        {fact('KO observation', koObservationLabel(p))}
-        {fact('KI observation', kiObservationLabel(p))}
+        {fact('KO observation', vf?.koObservation ?? koObservationLabel(p))}
+        {(hasKi || vf?.kiObservation) && fact('KI observation', vf?.kiObservation ?? kiObservationLabel(p))}
+        {extraTerms.filter(([, v]) => v).map(([k, v]) => <Fragment key={k}>{fact(k, v!, true)}</Fragment>)}
       </div>
 
       {/* Per-underlying strike/KO/KI table */}
@@ -1221,7 +1281,7 @@ function DetailGraphView({ selected, hasFile, onPreview, notional, setNotional, 
       {/* Backtest result */}
       <div className="section-h"><span className="overline">ผลแบ็คเทสต์</span></div>
       <div className="fact-grid">
-        {fact('ผลย้อนหลัง', bt.error ? 'ผิดพลาด' : `${bt.verdict === 'pass' ? 'Pass — ไม่เคยชน KI/KO' : 'Knocked — เคยชน KI/KO'}`)}
+        {fact('ผลย้อนหลัง', bt.error ? 'ผิดพลาด' : `${bt.verdict === 'pass' ? 'Pass — ไม่เคยชน KI' : 'Knocked — เคยชน KI'}${bt.knockedOut ? ' · เคยชน KO' : ''}`)}
         {fact('ช่วงที่ทดสอบ', `${bt.windowMonths} เดือนย้อนหลัง`, true)}
       </div>
       <div className="fact-item" style={{ borderBottom: 'none' }}>
@@ -1277,12 +1337,11 @@ function DetailGraphView({ selected, hasFile, onPreview, notional, setNotional, 
             </div>
           </div>
           {bt.series.map((s) => {
-            const { levels, marks } = levelsAndMarksFor(s, koTimes)
+            const { levels, marks } = levelsAndMarksFor(s, koTimes, { strikePct: p.strikePct, kiPct: p.kiPct, koPct: p.koPct })
             return (
               <div key={s.symbol} style={{ marginBottom: 28, border: `1px solid ${C.border}`, borderRadius: 10, overflow: 'hidden' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', background: C.bg, borderBottom: `1px solid ${C.border}`, flexWrap: 'wrap' }}>
                   <span className="num" style={{ fontSize: 14, fontWeight: 600, color: C.text }}>{s.symbol}</span>
-                  <span className="num" style={{ fontSize: 12, color: C.muted }}>initial {s.initialPrice?.toFixed(2) ?? '-'}</span>
                   <span className="num" style={{ fontSize: 12, color: C.muted }}>ปัจจุบัน {s.currentPrice?.toFixed(2) ?? '-'}</span>
                   {s.knockedIn && <span className="badge knock" style={{ marginLeft: 'auto' }}>เคยชน KI</span>}
                 </div>
