@@ -12,7 +12,8 @@ export const PROFILE_LABELS: Record<ProfileKey, string> = {
   all: 'All (ทั้งหมด)',
   aggressive: 'Aggressive (เน้นผลตอบแทน)',
   balanced: 'Balanced (สมดุล)',
-  save: 'Save (เน้นปลอดภัย)',
+  // Label reads "Safe"; the key stays `save` because it's persisted in sessions/CSV headers.
+  save: 'Safe (เน้นปลอดภัย)',
 }
 
 export function weightsFor(profile: ProfileKey): ScoreWeights {

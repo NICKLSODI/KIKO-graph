@@ -141,7 +141,7 @@ memie/
 ## 7. Run it
 
 ```bash
-# 1. Backend — needs Python + Claude Code installed & logged in (claude login) on THIS machine
+# 1. Backend — needs Python + Claude Code installed & logged in (claude auth login) on THIS machine
 cd backend
 pip install -r requirements.txt
 uvicorn main:app --reload

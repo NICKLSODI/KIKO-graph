@@ -3,13 +3,13 @@ import { C } from '../../theme'
 import { Screen, Card, NavBtn, IconOptions } from '../../ui/components'
 import { IconUpload, IconSearch, IconBarChart, IconTrophy, IconChevronRight, IconFileText, IconAlignLeft, IconCheck, IconMail } from '../../ui/icons'
 import { CandleChart } from '../../components/CandleChart'
-import type { GenerateFile } from '../../api/generate'
+import { checkAiHealth, friendlyError, isAuthError, startClaudeLogin, type AiHealth, type GenerateFile } from '../../api/generate'
 import { extractNotesFromSource, type NoteSource } from '../../features/backtest/extract'
 import { koTimesFor, levelsAndMarksFor } from '../../features/backtest/chartData'
 import type { InputMode } from '../../types'
 import { backtestScore, backtestDetail } from '../../features/backtest/engine'
 import { scoreProducts, weightsFor, PROFILE_LABELS } from '../../features/backtest/scoring'
-import { exportBatchZip, buildBatchZipBlob, captureRankingImages, sendEmailNow, rankingImageFilename, EXPORT_WINDOWS, printProductReport, downloadProductJpg, type WindowItems } from '../../features/backtest/exportReport'
+import { exportBatchFiles, buildBatchPackage, sendEmailNow, batchZipFilename, reportHtmlFilename, EXPORT_WINDOWS, printProductReport, downloadProductJpg, downloadProductInteractiveHtml, type WindowItems } from '../../features/backtest/exportReport'
 import type { BacktestResult, DetailProduct, NoteProduct, ProfileKey, ScoredProduct } from '../../features/backtest/types'
 import { STRUCTURE_TYPE_LABELS, koObservationLabel, kiObservationLabel } from '../../features/backtest/types'
 import type { RetrievedProductData } from '../../features/ingest/ingest'
@@ -171,7 +171,12 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   })
   const [emailing, setEmailing] = useState<string | null>(null)
   const [emailDone, setEmailDone] = useState<string | null>(null)
-  const [backendOk, setBackendOk] = useState<boolean | null>(null)
+  // null = still checking on mount. Gates the analyse button so a logged-out session is
+  // caught BEFORE the user waits through an extraction that cannot possibly succeed.
+  const [aiHealth, setAiHealth] = useState<AiHealth | null>(null)
+  const [recheckingAi, setRecheckingAi] = useState(false)
+  const [loggingIn, setLoggingIn] = useState(false)
+  const [loginNote, setLoginNote] = useState<string | null>(null)
   const [savedSession, setSavedSession] = useState<{ prods: NoteProduct[]; wm: number } | null>(() => loadSession())
 
   const [view, setView] = useState<'summary' | 'detail'>(RESUME?.view ?? 'summary')
@@ -207,11 +212,49 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     })()
 
   useEffect(() => {
-    fetch('http://localhost:8000/api/generate/health')
-      .then((r) => r.json())
-      .then((d) => setBackendOk(!!d?.available))
-      .catch(() => setBackendOk(false))
+    checkAiHealth().then(setAiHealth)
   }, [])
+
+  async function recheckAi(force = true): Promise<AiHealth> {
+    setRecheckingAi(true)
+    try {
+      const h = await checkAiHealth(force)
+      setAiHealth(h)
+      return h
+    } finally {
+      setRecheckingAi(false)
+    }
+  }
+
+  // Opens the login window on this machine, then polls the health probe so the banner
+  // clears by itself once the browser flow finishes — the user shouldn't have to guess
+  // when to press "ตรวจสอบอีกครั้ง". Gives up polling after ~2 min; the button still works.
+  async function loginToClaude() {
+    setLoggingIn(true)
+    setLoginNote(null)
+    try {
+      await startClaudeLogin()
+      setLoginNote('เปิดหน้าต่างล็อกอินแล้ว — ทำตามขั้นตอนในเบราว์เซอร์/หน้าต่างสีดำที่เพิ่งเด้งขึ้นมา ระบบจะตรวจสอบให้เองเมื่อเสร็จ')
+      for (let i = 0; i < 24; i++) {
+        await new Promise((r) => setTimeout(r, 5000))
+        const h = await checkAiHealth(true)
+        setAiHealth(h)
+        if (h.auth === 'ok') {
+          setLoginNote('เข้าสู่ระบบสำเร็จ — เริ่มวิเคราะห์ได้เลย')
+          return
+        }
+      }
+      setLoginNote('ยังไม่พบการเข้าสู่ระบบที่สำเร็จ — ล็อกอินให้เสร็จแล้วกด "ตรวจสอบอีกครั้ง"')
+    } catch (err) {
+      setLoginNote(friendlyError(err))
+    } finally {
+      setLoggingIn(false)
+    }
+  }
+
+  // "unknown" is deliberately NOT blocking: a slow cold-start probe must not stop someone
+  // whose login is actually fine. Only a confirmed dead login / missing CLI / dead backend does.
+  const aiBlocked = aiHealth != null && (aiHealth.offline || aiHealth.auth === 'expired' || aiHealth.auth === 'no-cli')
 
   async function recompute(prods: NoteProduct[], wm: number) {
     setRecomputing(true)
@@ -258,13 +301,25 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     if (text) pending.push({ kind: 'text', text, label: `ข้อความ #${sources.filter((s) => s.kind === 'text').length + 1}` })
     const all = [...sources, ...pending]
     if (all.length === 0) return
+
+    // Preflight: the login can die while the tab sits open, so the mount-time check isn't
+    // enough. Verify before extracting — a 2s check beats a 3-minute failure the user
+    // can't interpret.
+    setErrors([])
+    setProgress('ตรวจสอบการเชื่อมต่อ AI...')
+    setPhase('running')
+    const health = await recheckAi(false)
+    if (health.offline || health.auth === 'expired' || health.auth === 'no-cli') {
+      setPhase('upload')
+      setProgress('')
+      return // the upload screen's panel already explains this one, in Thai, with the fix
+    }
+
     if (pending.length) {
       setSources(all)
       setTextDraft('')
     }
 
-    setPhase('running')
-    setErrors([])
     const errs: string[] = []
     // One source can yield MANY products (a pasted desk listing → N products), so each
     // slot holds an array that gets flattened afterwards.
@@ -276,27 +331,41 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     const CONCURRENCY = 3
     let started = 0
     let done = 0
+    // A login that dies mid-batch fails every remaining source the same way. Abort the
+    // whole run at the first one and send the user back to the panel that explains it.
+    let authDied = false
     setProgress(`สกัดข้อมูล 0/${all.length}`)
     async function worker() {
-      while (started < all.length) {
+      while (started < all.length && !authDied) {
         const i = started++
         const source = all[i]
         try {
           // One source can hold MANY products: a pasted desk listing (chunked internally),
           // or a single term-sheet file/link whose table has several baskets (one per row).
-          const prods = await extractNotesFromSource(source, () => crypto.randomUUID(), (msg) => errs.push(msg))
+          const prods = await extractNotesFromSource(source, () => crypto.randomUUID(), (msg) => errs.push(friendlyError(msg)))
           results[i] = prods
           // Map every product from this file back to it, so each basket can re-generate its
           // factsheet later from the same upload.
           if (source.kind === 'file') for (const p of prods) nextFileById[p.id] = source.file
         } catch (err) {
-          errs.push(err instanceof Error ? err.message : String(err))
+          if (isAuthError(err)) {
+            authDied = true
+            return
+          }
+          errs.push(friendlyError(err))
         }
         done++
         setProgress(`สกัดข้อมูล ${done}/${all.length}`)
       }
     }
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, all.length) }, worker))
+
+    if (authDied) {
+      await recheckAi(true) // refresh the banner so it shows the login fix, not a raw error
+      setPhase('upload')
+      setProgress('')
+      return
+    }
 
     const prods = results.flat()
     setProducts(prods)
@@ -343,26 +412,43 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     setPreview(null)
   }
 
-  // Everything on screen (ranked KIKO + unranked others) → summary.csv + per-product
-  // JPG + PDF in one zip. Each product report stacks all three windows (6M/1Y/2Y); series
-  // are computed on the fly per window (prices already cached — CPU only).
+  // Everything on screen, ranked KIKO + unranked others, in canonical export order.
+  const exportList = (): DetailProduct[] => [...scored, ...otherItems.map((it) => ({ ...it, score: null, rank: null }))]
+
+  // Ranking source for the interactive report: the KIKO items scored under every export
+  // window. Prices are cached from the dashboard's own pass, so this is CPU only.
+  async function rankingByWindow(setStatus: (s: string) => void): Promise<WindowItems[]> {
+    const kikoProducts = products.filter((p) => p.structureType === 'kiko')
+    const byWindow: WindowItems[] = []
+    for (const wm of EXPORT_WINDOWS) {
+      setStatus(`แบ็คเทสต์ย้อนหลัง ${wm} เดือน...`)
+      const wItems: WindowItems['items'] = []
+      for (const p of kikoProducts) wItems.push({ product: p, backtest: await backtestScore(p, wm) })
+      byWindow.push({ windowMonths: wm, items: wItems })
+    }
+    return byWindow
+  }
+
+  // Downloads the same two files the email sends: the interactive ranking report and the zip
+  // of per-basket files (LINE images + factsheets + summary.csv).
   async function handleExportAllZip() {
-    const list: DetailProduct[] = [...scored, ...otherItems.map((it) => ({ ...it, score: null, rank: null }))]
+    const list = exportList()
     if (!list.length || zipping) return
     setZipping('เตรียมไฟล์...')
     try {
-      await exportBatchZip(list, (done, total) => setZipping(`สร้างไฟล์ ${done}/${total}...`))
+      const byWindow = await rankingByWindow(setZipping)
+      await exportBatchFiles(list, byWindow, (done, total) => setZipping(`สร้างไฟล์ ${done}/${total}...`))
     } catch (err) {
-      setErrors((prev) => [...prev, `ดาวน์โหลด ZIP ไม่สำเร็จ: ${err instanceof Error ? err.message : String(err)}`])
+      setErrors((prev) => [...prev, `ดาวน์โหลดไม่สำเร็จ: ${friendlyError(err)}`])
     } finally {
       setZipping(null)
     }
   }
 
-  // Full email package: capture the ranking (3 windows × 3 profiles) + build the batch ZIP,
-  // then AUTO-SEND for real via the Outlook COM object (attaches every file + .Send()), the
-  // same pattern as fundconnext_portfolio.py. Sending is irreversible, so we confirm the
-  // recipient count with the user first.
+  // Full email package: one interactive HTML report (ranking page, 3 windows × 3 profiles,
+  // click through to each basket's charts) + the ZIP of per-basket files, then AUTO-SEND for
+  // real via the Outlook COM object (attaches every file + .Send()), the same pattern as
+  // fundconnext_portfolio.py. Sending is irreversible, so we confirm the recipient count first.
   async function handleSendEmail() {
     const recips = emailRecipients.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean)
     if (!recips.length) {
@@ -375,20 +461,9 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     setEmailDone(null)
     setEmailing('เตรียมข้อมูล...')
     try {
-      // Backtest KIKO items across all export windows (prices cached — CPU only).
-      const kikoProducts = products.filter((p) => p.structureType === 'kiko')
-      const byWindow: WindowItems[] = []
-      for (const wm of EXPORT_WINDOWS) {
-        setEmailing(`แบ็คเทสต์ย้อนหลัง ${wm} เดือน...`)
-        const wItems: WindowItems['items'] = []
-        for (const p of kikoProducts) wItems.push({ product: p, backtest: await backtestScore(p, wm) })
-        byWindow.push({ windowMonths: wm, items: wItems })
-      }
-      setEmailing('แคปรูป ranking...')
-      const images = await captureRankingImages(byWindow)
-      setEmailing('สร้างไฟล์ ZIP...')
-      const list: DetailProduct[] = [...scored, ...otherItems.map((it) => ({ ...it, score: null, rank: null }))]
-      const zipBlob = await buildBatchZipBlob(list, (d, t) => setEmailing(`สร้างไฟล์ ${d}/${t}...`))
+      const byWindow = await rankingByWindow(setEmailing)
+      setEmailing('สร้างรายงาน...')
+      const pkg = await buildBatchPackage(exportList(), byWindow, (d, t) => setEmailing(`สร้างไฟล์ ${d}/${t}...`))
       setEmailing('กำลังส่งผ่าน Outlook...')
       const today = new Date().toLocaleDateString('th-TH', { dateStyle: 'long' })
       const subject = `SN·Desk — สรุปและจัดอันดับตราสารโครงสร้าง ${today}`
@@ -400,8 +475,8 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
         `<p>เรียนทีมงาน,</p>`,
         `<p>แนบสรุปและจัดอันดับ KIKO ประจำวันที่ ${today}</p>`,
         `<ul>`,
-        `<li>รูป ranking ย้อนหลัง 6 เดือน / 1 ปี / 2 ปี (แต่ละรูปมีตาราง Aggressive / Balanced / Save)</li>`,
-        `<li>ไฟล์ ZIP: รายงานราย product (PDF + รูป + factsheet) และตารางสรุป CSV</li>`,
+        `<li><b>${reportHtmlFilename()}</b> — เปิดไฟล์นี้ในเบราว์เซอร์: หน้าจัดอันดับ เลือกช่วงย้อนหลัง 6 เดือน / 1 ปี / 2 ปี และโปรไฟล์คะแนน All / Aggressive / Safe ได้ (All จัดเรียงเองได้ Aggressive กับ Safe ตำแหน่งคงที่) กดชื่อ product เพื่อเข้าไปดูรายละเอียดและกราฟที่เลื่อน/ซูมได้</li>`,
+        `<li>ไฟล์ ZIP: <code>png-for-line/</code> รูปส่งไลน์, <code>factsheet_th/</code> + <code>factsheet_en/</code> factsheet รายตัว, และ <code>summary.csv</code> (มีสำเนาไฟล์รายงานด้านบนอยู่ใน ZIP ด้วย)</li>`,
         `</ul>`,
         ...(sourceText ? [
           `<p style="font-weight:600;margin:16px 0 6px">ข้อมูลตั้งต้น (ข้อความที่สกัด):</p>`,
@@ -409,11 +484,9 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
         ] : []),
         `<p style="color:#888;font-size:12px;margin-top:16px">อีเมลนี้สร้างและส่งอัตโนมัติจาก SN·Desk</p>`,
       ].join('')
-      const d = new Date()
-      const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
       const attachments = [
-        ...images.map((im) => ({ filename: rankingImageFilename(im.windowMonths), blob: im.blob })),
-        { filename: `SN-Desk-batch-${stamp}.zip`, blob: zipBlob },
+        { filename: reportHtmlFilename(), blob: pkg.reportHtml },
+        { filename: batchZipFilename(), blob: pkg.zip },
       ]
       // Outlook may not be ready on the first try (still launching / mid-login) — the backend
       // returns the "เปิด Outlook ไม่ได้ หรือ login ไม่เสร็จ" 503 in that case. Auto-retry the
@@ -437,17 +510,18 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
       }
       setEmailDone(`✅ ส่งอีเมลแล้ว (${result!.recipients.length} คน, ไฟล์แนบ ${result!.attachments} รายการ) ผ่าน Outlook`)
     } catch (err) {
-      setErrors((prev) => [...prev, `ส่งอีเมลไม่สำเร็จ: ${err instanceof Error ? err.message : String(err)}`])
+      setErrors((prev) => [...prev, `ส่งอีเมลไม่สำเร็จ: ${friendlyError(err)}`])
     } finally {
       setEmailing(null)
     }
   }
 
-  async function handleExportSelected(format: 'pdf' | 'jpg') {
+  async function handleExportSelected(format: 'pdf' | 'jpg' | 'html') {
     if (!selected) return
     setPrinting(true)
     try {
       if (format === 'pdf') await printProductReport(selected, windowMonths)
+      else if (format === 'html') await downloadProductInteractiveHtml(selected, windowMonths)
       else await downloadProductJpg(selected, windowMonths)
     } finally {
       setPrinting(false)
@@ -519,10 +593,56 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
         <Card>
           {phase === 'upload' && (
             <>
-              {backendOk === false && (
-                <div style={{ fontSize: 12.5, color: C.coral, background: C.coralLight, border: `1px solid ${C.coralBorder}`, borderRadius: 8, padding: '10px 14px', marginBottom: 14, lineHeight: 1.6 }}>
-                  เชื่อมต่อ backend ไม่ได้ (localhost:8000) — เปิดเซิร์ฟเวอร์ก่อน มิฉะนั้นการสกัดข้อมูล/โหลดราคาจะไม่ทำงาน
+              {/* Setup problems are shown BEFORE any work starts, with the exact fix and a
+                  recheck button — a desk user must never discover a dead login only after
+                  waiting through a failed extraction. */}
+              {aiBlocked && aiHealth && (
+                <div style={{ background: C.coralLight, border: `1px solid ${C.coralBorder}`, borderRadius: 10, padding: '14px 16px', marginBottom: 14, lineHeight: 1.65 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: C.coral, marginBottom: 6 }}>
+                    ⚠ ยังเริ่มวิเคราะห์ไม่ได้
+                  </div>
+                  <div style={{ fontSize: 13, color: C.text, marginBottom: 10 }}>{aiHealth.reason}</div>
+                  {aiHealth.fix && (
+                    <div style={{ fontSize: 13, color: C.text, marginBottom: 12 }}>
+                      <b>วิธีแก้:</b> {aiHealth.fix}
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                    {/* Expired login is the ONE failure a desk user can fix themselves, so it
+                        gets a button that opens the login window for them rather than a
+                        command to type. Missing CLI / dead backend can't be fixed from here. */}
+                    {aiHealth.auth === 'expired' && (
+                      <button
+                        className="btn-ghost"
+                        onClick={loginToClaude}
+                        disabled={loggingIn}
+                        style={{ padding: '7px 16px', borderRadius: 8, border: 'none', background: C.coral, color: C.white, fontSize: 13, fontWeight: 700, cursor: loggingIn ? 'default' : 'pointer' }}
+                      >
+                        {loggingIn ? 'กำลังเปิดหน้าต่างล็อกอิน...' : 'เข้าสู่ระบบ Claude'}
+                      </button>
+                    )}
+                    <button
+                      className="btn-ghost"
+                      onClick={() => recheckAi(true)}
+                      disabled={recheckingAi}
+                      style={{ padding: '7px 16px', borderRadius: 8, border: `1px solid ${C.coralBorder}`, background: C.white, color: C.coral, fontSize: 13, fontWeight: 600, cursor: recheckingAi ? 'default' : 'pointer' }}
+                    >
+                      {recheckingAi ? 'กำลังตรวจสอบ...' : 'ตรวจสอบอีกครั้ง'}
+                    </button>
+                    <span style={{ fontSize: 12, color: C.muted }}>แก้เองไม่ได้ ดู MAINTENANCE.md หรือเปิด Claude Code (โปรเจกต์ Structure Note Summary Website)</span>
+                  </div>
+                  {loginNote && (
+                    <div style={{ fontSize: 12.5, color: C.text, marginTop: 10 }}>{loginNote}</div>
+                  )}
                 </div>
+              )}
+              {/* Login just succeeded: the blocking banner is gone, so the confirmation needs
+                  its own home or the user is left wondering whether it worked. */}
+              {!aiBlocked && loginNote && (
+                <div style={{ fontSize: 12.5, color: C.teal, background: C.tealLight, border: `1px solid ${C.tealBorder}`, borderRadius: 8, padding: '10px 14px', marginBottom: 14 }}>{loginNote}</div>
+              )}
+              {aiHealth == null && (
+                <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 14 }}>กำลังตรวจสอบการเชื่อมต่อ AI...</div>
               )}
               {savedSession && (
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, fontSize: 12.5, color: C.teal, background: C.tealLight, border: `1px solid ${C.tealBorder}`, borderRadius: 8, padding: '10px 14px', marginBottom: 14 }}>
@@ -595,9 +715,10 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
               )}
 
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 12, marginTop: 20 }}>
-                <NavBtn onClick={run} disabled={sources.length + (textDraft.trim() ? 1 : 0) === 0}>
+                <NavBtn onClick={run} disabled={aiBlocked || sources.length + (textDraft.trim() ? 1 : 0) === 0}>
                   {(() => {
                     // The pending text draft counts toward the total so the button reflects what run() will do.
+                    if (aiBlocked) return 'แก้ปัญหาด้านบนก่อน'
                     const n = sources.length + (textDraft.trim() ? 1 : 0)
                     return n ? `เริ่มวิเคราะห์ ${n} รายการ →` : 'เพิ่มข้อมูลก่อน'
                   })()}
@@ -785,7 +906,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
                 value=""
                 disabled={printing || !selected}
                 onChange={(e) => {
-                  const format = e.target.value as 'pdf' | 'jpg'
+                  const format = e.target.value as 'pdf' | 'jpg' | 'html'
                   if (format) handleExportSelected(format)
                 }}
                 style={{ padding: '9px 14px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.text, color: C.white, fontSize: 13, fontWeight: 600, cursor: printing || !selected ? 'default' : 'pointer' }}
@@ -793,6 +914,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
                 <option value="" disabled>{printing ? 'กำลังสร้างไฟล์...' : 'ดาวน์โหลดตะกร้านี้'}</option>
                 <option value="pdf">บันทึกเป็น PDF</option>
                 <option value="jpg">บันทึกเป็น JPG (ส่งไลน์)</option>
+                <option value="html">บันทึกเป็น HTML (กราฟกดเล่นได้)</option>
               </select>
             </div>
           </div>
@@ -840,15 +962,15 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
               className="btn-ghost"
               onClick={handleExportAllZip}
               disabled={!!zipping || items.length === 0}
-              title="ดาวน์โหลดทุกผลิตภัณฑ์เป็นไฟล์เดียว: ตารางสรุป CSV + PDF และ JPG ของแต่ละตัว"
+              title="ดาวน์โหลด 2 ไฟล์: รายงาน HTML (หน้าจัดอันดับ กดเข้าไปดูกราฟแต่ละตะกร้าได้) + ZIP (รูปส่งไลน์, factsheet TH/EN, summary.csv)"
               style={{ padding: '7px 14px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: zipping ? C.muted : C.text, fontSize: 12.5, cursor: zipping ? 'wait' : 'pointer' }}
             >
-              {zipping ?? '⬇ ZIP ทั้งหมด'}
+              {zipping ?? '⬇ ดาวน์โหลดทั้งหมด'}
             </button>
             <button
               onClick={() => setEmailOpen((v) => !v)}
               disabled={items.length === 0}
-              title="แคปหน้า ranking (6M/1Y/2Y) + ZIP แล้วส่งอีเมลอัตโนมัติผ่าน Outlook (แนบไฟล์ครบ)"
+              title="สร้างรายงาน HTML (จัดอันดับ 6M/1Y/2Y + กราฟรายตะกร้า) + ZIP แล้วส่งอีเมลอัตโนมัติผ่าน Outlook"
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 7, padding: '9px 18px', borderRadius: 8,
                 border: `1px solid ${C.primary}`, background: C.primary, color: C.onPrimary,
@@ -878,7 +1000,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
           <div style={{ marginTop: 12, padding: 14, borderRadius: 10, border: `1px solid ${C.primaryBorder}`, background: C.primaryLight }}>
             <div style={{ fontSize: 13, fontWeight: 600, color: C.text, marginBottom: 6 }}>ส่งรายงานทางอีเมลอัตโนมัติ (Outlook)</div>
             <div style={{ fontSize: 12, color: C.muted, marginBottom: 8, lineHeight: 1.6 }}>
-              ระบบจะแคปหน้า ranking ทั้ง 3 ช่วง (6 เดือน / 1 ปี / 2 ปี) + สร้าง ZIP รายงาน แล้ว<b>ส่งอีเมลจริงทันที</b>ผ่าน Outlook พร้อมแนบไฟล์ครบทุกไฟล์ (รูป + ZIP) — มีหน้าต่างยืนยันก่อนส่ง (ส่งแล้วยกเลิกไม่ได้ · ต้องเปิด Outlook ค้างไว้ + login แล้ว)
+              ระบบจะสร้าง<b>รายงาน HTML ไฟล์เดียว</b> (หน้าจัดอันดับ 6 เดือน / 1 ปี / 2 ปี กดชื่อ product เข้าไปดูกราฟที่เลื่อน/ซูมได้) + ZIP (รูปส่งไลน์, factsheet TH/EN, summary.csv) แล้ว<b>ส่งอีเมลจริงทันที</b>ผ่าน Outlook — มีหน้าต่างยืนยันก่อนส่ง (ส่งแล้วยกเลิกไม่ได้ · ต้องเปิด Outlook ค้างไว้ + login แล้ว)
             </div>
             <textarea
               value={emailRecipients}

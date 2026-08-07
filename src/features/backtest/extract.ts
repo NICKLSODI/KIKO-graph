@@ -1,4 +1,4 @@
-import { generate, type GenerateFile } from '../../api/generate'
+import { generate, isAuthError, type GenerateFile } from '../../api/generate'
 import type { NoteProduct, StructureType } from './types'
 import { STRUCTURE_TYPES, STRUCTURE_TYPE_LABELS } from './types'
 import type { MarketHint } from '../ingest/ingest'
@@ -284,8 +284,11 @@ export async function extractNotesFromTextChunked(text: string, label: string, m
   const out: NoteProduct[][] = new Array(chunks.length).fill(null).map(() => [])
   const failures: string[] = []
   let started = 0
+  // A dead Claude login fails EVERY chunk identically. Stop the whole batch at the first
+  // one instead of grinding through the rest and reporting the same error N times.
+  let authError: Error | null = null
   async function worker() {
-    while (started < chunks.length) {
+    while (started < chunks.length && !authError) {
       const idx = started++
       try {
         out[idx] = await extractNotesFromText(chunks[idx], `${label} #${idx + 1}`, mkId)
@@ -293,11 +296,16 @@ export async function extractNotesFromTextChunked(text: string, label: string, m
         // Isolate a failed chunk — the rest still return — but never swallow the reason:
         // a fully-failed paste used to land on an empty dashboard with no error at all.
         out[idx] = []
+        if (isAuthError(err)) {
+          authError = err instanceof Error ? err : new Error(String(err))
+          return
+        }
         failures.push(`${label} #${idx + 1}: ${err instanceof Error ? err.message : String(err)}`)
       }
     }
   }
   await Promise.all(Array.from({ length: Math.min(CHUNK_CONCURRENCY, chunks.length) }, worker))
+  if (authError) throw authError
   const prods = out.flat()
   if (failures.length) {
     // Nothing survived → throw, so the caller's own error handling surfaces it.

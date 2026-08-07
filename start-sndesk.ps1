@@ -1,7 +1,12 @@
-# SN-Desk (KIKO-graph) one-click launcher
+﻿# SN-Desk (KIKO-graph) one-click launcher
 # Reuses already-running servers instantly; only cold-starts what's down.
 
 $ErrorActionPreference = "Stop"
+
+# Thai strings below are UTF-8. This file MUST stay saved as UTF-8 *with BOM*: PowerShell 5.1
+# parses a BOM-less .ps1 using the ANSI codepage (874 on Thai Windows) and mangles them.
+# This line fixes the other half -- the console re-encoding what we print.
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $root      = Split-Path -Parent $MyInvocation.MyCommand.Path
 $backend   = Join-Path $root "backend"
 $venvPy    = Join-Path $backend ".venv\Scripts\python.exe"
@@ -33,7 +38,7 @@ if ((Test-Port 8000) -and (Test-Port 5173) -and (Test-Health)) {
 # --- Verify Claude Code CLI ---
 $claude = Get-Command claude -ErrorAction SilentlyContinue
 if (-not $claude) {
-    Write-Host "[X] Claude Code not found in PATH. Install + 'claude login' first." -ForegroundColor Red
+    Write-Host "[X] Claude Code not found in PATH. Install + 'claude auth login' first." -ForegroundColor Red
     Read-Host "Press Enter to exit"; exit 1
 }
 $ver = (& $claude.Source --version) 2>&1
@@ -43,6 +48,28 @@ if ($ver -notmatch "Claude Code") {
     Read-Host "Press Enter to exit"; exit 1
 }
 Write-Host "[OK] Claude Code: $ver" -ForegroundColor Green
+
+# --- Verify Claude login (free + instant; no tokens) ---
+# An installed-but-logged-out CLI fails every AI call. Catch it HERE, at startup, and offer
+# to fix it now -- otherwise the user finds out only after a long extraction fails.
+$authOut = (& $claude.Source auth status --json) 2>&1
+$loggedIn = $false
+try { $loggedIn = [bool]((($authOut -join "") | ConvertFrom-Json).loggedIn) } catch { $loggedIn = $false }
+if ($loggedIn) {
+    Write-Host "[OK] Claude login active" -ForegroundColor Green
+} else {
+    Write-Host "[!] Claude is NOT logged in - AI features will fail." -ForegroundColor Yellow
+    Write-Host "    ยังไม่ได้เข้าสู่ระบบ Claude - ปุ่มวิเคราะห์จะใช้ไม่ได้" -ForegroundColor Yellow
+    $ans = Read-Host "    Log in now? (Y/n)"
+    if ($ans -notmatch '^[Nn]') {
+        & $claude.Source auth login
+        Write-Host "[..] Re-checking login..." -ForegroundColor Yellow
+        $authOut = (& $claude.Source auth status --json) 2>&1
+        try { $loggedIn = [bool]((($authOut -join "") | ConvertFrom-Json).loggedIn) } catch { $loggedIn = $false }
+        if ($loggedIn) { Write-Host "[OK] Claude login active" -ForegroundColor Green }
+        else { Write-Host "[!] Still not logged in - the web page will show a login button." -ForegroundColor Yellow }
+    }
+}
 
 # --- Backend ---
 if (Test-Port 8000) {

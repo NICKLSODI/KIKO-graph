@@ -38,6 +38,128 @@ YAHOO_RANGE_MAP = {
 CLAUDE_BIN = shutil.which("claude")
 CLAUDE_TIMEOUT_SECONDS = 300  # image/scanned-PDF path uses Claude's Read tool (agentic loop + cold start) — 180s too tight
 
+# ── Claude Code login state ───────────────────────────────────────────────────
+# The CLI being installed does NOT mean it can talk to Anthropic: the OAuth session
+# expires periodically and only fails at call time. That used to surface as a raw
+# English CLI error AFTER a long extraction had already burned the user's time, which
+# is useless to a non-technical desk user. So: probe the login up-front, cache it, and
+# let the frontend block the "analyse" button with a plain-Thai fix instead.
+AUTH_PROBE_TIMEOUT_SECONDS = 40
+AUTH_CACHE_TTL_SECONDS = 300
+# Substrings that mean "logged out / session dead", not "the model failed".
+AUTH_ERROR_MARKERS = (
+    "oauth",
+    "session expired",
+    "could not be refreshed",
+    "failed to authenticate",
+    "authentication",
+    "unauthorized",
+    "401",
+    "invalid api key",
+    "please run /login",
+    "not logged in",
+)
+
+LOGIN_FIX_TH = 'กดปุ่ม "เข้าสู่ระบบ Claude" ด้านล่าง ระบบจะเปิดหน้าต่างล็อกอินให้เอง (หรือพิมพ์ claude auth login ใน PowerShell) แล้วกดตรวจสอบอีกครั้ง'
+LOGIN_EXPIRED_TH = "การเข้าสู่ระบบ Claude หมดอายุ — ระบบยังเรียก AI ไม่ได้จนกว่าจะล็อกอินใหม่"
+NO_CLI_TH = "ไม่พบโปรแกรม Claude Code บนเครื่องนี้"
+NO_CLI_FIX_TH = "ติดตั้ง Claude Code แล้วพิมพ์ claude auth login ใน PowerShell (ดู MAINTENANCE.md อาการ B)"
+
+# {"state", "reason", "fix", "checked_at"} — refreshed by _auth_status().
+_auth_cache: dict | None = None
+
+
+def _is_auth_error(text: str) -> bool:
+    low = (text or "").lower()
+    return any(m in low for m in AUTH_ERROR_MARKERS)
+
+
+def _claude_run(args: list, prompt: str, timeout: int) -> subprocess.CompletedProcess:
+    """Invoke the Claude Code CLI with the prompt on stdin. ANTHROPIC_BASE_URL is stripped
+    so it always uses the user's own `claude login` rather than an inherited proxy."""
+    child_env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_BASE_URL"}
+    return subprocess.run(
+        args,
+        input=prompt,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=timeout,
+        env=child_env,
+        # `claude` on Windows is an npm .cmd shim — CreateProcess can't launch .cmd/.bat
+        # directly (WinError 2), it needs cmd.exe as the interpreter. shell=True routes
+        # through cmd.exe; posix doesn't need it since `claude` there is a real executable.
+        shell=(os.name == "nt"),
+    )
+
+
+def _credentials_present() -> bool | None:
+    """`claude auth status` — instant, free, no tokens. False means "no stored login at
+    all", which is the common case and lets the UI answer in <1s instead of waiting out
+    the ping. True only means credentials EXIST; a stale refresh token still passes here,
+    which is why it's a short-circuit and not the whole probe. None = couldn't tell."""
+    try:
+        proc = subprocess.run(
+            [CLAUDE_BIN, "auth", "status", "--json"],
+            capture_output=True, text=True, encoding="utf-8", timeout=20,
+            shell=(os.name == "nt"),
+        )
+        return bool(json.loads(proc.stdout or "{}").get("loggedIn"))
+    except Exception:
+        return None
+
+
+def _probe_auth() -> dict:
+    """One tiny real call — the only way to know the OAuth session still works. Costs a
+    handful of tokens and a few seconds, which is why the result is cached."""
+    if not CLAUDE_BIN:
+        return {"state": "no-cli", "reason": NO_CLI_TH, "fix": NO_CLI_FIX_TH}
+    if _credentials_present() is False:
+        return {"state": "expired", "reason": LOGIN_EXPIRED_TH, "fix": LOGIN_FIX_TH}
+    try:
+        proc = _claude_run(
+            [CLAUDE_BIN, "-p", "--output-format", "text", "--model", "claude-sonnet-5"],
+            "ping",
+            AUTH_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        # Slow machine / cold start — not proof of a dead login, so don't cry wolf and
+        # block the button over it.
+        return {"state": "unknown", "reason": "ตรวจสอบการเข้าสู่ระบบไม่ทัน (เครื่องช้าหรือเพิ่งเปิด)", "fix": "ลองกดตรวจสอบอีกครั้ง"}
+    except Exception as exc:
+        return {"state": "unknown", "reason": f"ตรวจสอบการเข้าสู่ระบบไม่ได้: {exc}", "fix": "ลองกดตรวจสอบอีกครั้ง"}
+
+    if proc.returncode == 0:
+        return {"state": "ok", "reason": None, "fix": None}
+    err = (proc.stderr or proc.stdout or "").strip()
+    if _is_auth_error(err):
+        return {"state": "expired", "reason": LOGIN_EXPIRED_TH, "fix": LOGIN_FIX_TH}
+    return {"state": "unknown", "reason": f"Claude Code ตอบกลับผิดปกติ: {err[:200]}", "fix": "ลองกดตรวจสอบอีกครั้ง หรือดู MAINTENANCE.md อาการ B"}
+
+
+def _auth_status(force: bool = False) -> dict:
+    """Cached login state. `force` re-probes now (the UI's "ตรวจสอบอีกครั้ง" button)."""
+    global _auth_cache
+    now = datetime.now(timezone.utc).timestamp()
+    if not force and _auth_cache and (now - _auth_cache["checked_at"]) < AUTH_CACHE_TTL_SECONDS:
+        return _auth_cache
+    status = _probe_auth()
+    status["checked_at"] = now
+    _auth_cache = status
+    return status
+
+
+def _mark_auth_expired() -> None:
+    """Called when a real generate call hits an auth error — free, instant, and more
+    authoritative than the cached probe, so the UI blocks immediately afterwards."""
+    global _auth_cache
+    _auth_cache = {
+        "state": "expired",
+        "reason": LOGIN_EXPIRED_TH,
+        "fix": LOGIN_FIX_TH,
+        "checked_at": datetime.now(timezone.utc).timestamp(),
+    }
+
 # Path to the NotebookLM CLI (`nlm`). Used for term-sheet extraction instead of Claude.
 NLM_BIN = shutil.which("nlm")
 NLM_TIMEOUT_SECONDS = 180
@@ -177,9 +299,55 @@ def get_candles_twelvedata(symbol: str, interval: str = "1day"):
 
 
 @app.get("/api/generate/health")
-def generate_health():
-    """Lets the frontend tell the user up-front whether local Claude Code is usable."""
-    return {"available": CLAUDE_BIN is not None, "bin": CLAUDE_BIN}
+def generate_health(check_auth: bool = True, force: bool = False):
+    """Lets the frontend tell the user up-front whether local Claude Code is usable.
+
+    `available` stays "the CLI exists" for backwards compatibility; `auth` is what the UI
+    actually gates on, since an installed-but-logged-out CLI fails every call.
+    Pass check_auth=false for a cheap liveness ping, force=true to re-probe after a login.
+    """
+    base = {"available": CLAUDE_BIN is not None, "bin": CLAUDE_BIN}
+    if not check_auth:
+        return {**base, "auth": "unchecked", "reason": None, "fix": None}
+    status = _auth_status(force=force)
+    return {
+        **base,
+        "auth": status["state"],  # ok | expired | no-cli | unknown
+        "reason": status["reason"],
+        "fix": status["fix"],
+    }
+
+
+@app.post("/api/generate/login")
+def generate_login():
+    """Opens the Claude login flow for the user instead of telling them to type a command.
+
+    `claude auth login` is interactive (it prints a URL and waits for the browser callback),
+    so it cannot run inside this request — it gets its OWN visible console window, detached,
+    and this returns immediately. The user finishes in the browser and presses
+    "ตรวจสอบอีกครั้ง", which force-re-probes. Nothing here can confirm the login itself.
+    """
+    if not CLAUDE_BIN:
+        raise HTTPException(status_code=503, detail=f"{NO_CLI_TH} — {NO_CLI_FIX_TH}")
+    # Only reachable from the local UI, and the command is a fixed argv with no user input.
+    if os.name == "nt":
+        shell = _POWERSHELL_BIN or "powershell"
+        args = [shell, "-NoExit", "-Command", "claude auth login"]
+        creationflags = subprocess.CREATE_NEW_CONSOLE
+    else:
+        args = [CLAUDE_BIN, "auth", "login"]
+        creationflags = 0
+    try:
+        subprocess.Popen(args, creationflags=creationflags)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"เปิดหน้าต่างล็อกอินอัตโนมัติไม่ได้ ({exc}) — เปิด PowerShell แล้วพิมพ์ claude auth login เอง",
+        )
+    # The probe is now stale-by-design: force a re-check on the next health call.
+    global _auth_cache
+    _auth_cache = None
+    return {"started": True}
 
 
 # Extracted-text path: a digital PDF's embedded text is 10-50x fewer tokens than
@@ -220,11 +388,7 @@ def generate(payload: dict = Body(...)):
     if not isinstance(prompt, str) or not prompt.strip():
         raise HTTPException(status_code=400, detail="prompt is required")
     if not CLAUDE_BIN:
-        raise HTTPException(status_code=500, detail="ไม่พบคำสั่ง claude บนเครื่อง — ติดตั้ง Claude Code แล้วรัน `claude login` ก่อน")
-
-    # Run with ANTHROPIC_BASE_URL stripped so it always uses the user's `claude login`
-    # credentials rather than any proxy that a parent process may have injected.
-    child_env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_BASE_URL"}
+        raise HTTPException(status_code=503, detail=f"{NO_CLI_TH} — {NO_CLI_FIX_TH}")
 
     args = [CLAUDE_BIN, "-p", "--output-format", "text", "--model", "claude-sonnet-5"]
 
@@ -259,27 +423,21 @@ def generate(payload: dict = Body(...)):
         args += ["--allowedTools", "WebFetch"]
 
     try:
-        proc = subprocess.run(
-            args,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=CLAUDE_TIMEOUT_SECONDS,
-            env=child_env,
-            # `claude` on Windows is an npm .cmd shim — CreateProcess can't launch .cmd/.bat
-            # directly (WinError 2), it needs cmd.exe as the interpreter. shell=True routes
-            # through cmd.exe; posix doesn't need it since `claude` there is a real executable.
-            shell=(os.name == "nt"),
-        )
+        proc = _claude_run(args, prompt, CLAUDE_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="Claude Code ใช้เวลานานเกินไป (timeout)")
+        raise HTTPException(status_code=504, detail="Claude Code ใช้เวลานานเกินไป (timeout) — ลองแบ่งเอกสาร/ข้อความให้สั้นลงแล้วทำใหม่")
     finally:
         if tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip() or "claude CLI ทำงานไม่สำเร็จ"
+        # A dead login is a user-fixable setup problem, not a model failure — give it its
+        # own status + plain-Thai instruction, and poison the health cache so the UI blocks
+        # the next attempt instead of letting it fail the same way again.
+        if _is_auth_error(detail):
+            _mark_auth_expired()
+            raise HTTPException(status_code=401, detail=f"{LOGIN_EXPIRED_TH} — {LOGIN_FIX_TH}")
         raise HTTPException(status_code=502, detail=f"Claude Code error: {detail[:500]}")
 
     return {"text": (proc.stdout or "").strip()}
