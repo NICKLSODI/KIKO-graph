@@ -197,6 +197,7 @@ export function PersonaScreen({ state, patch }: { state: AppState; patch: Patch 
       title="สร้างโปรไฟล์ลูกค้า"
       subtitle="เลือกคุณลักษณะของลูกค้า ระบบจะปรับเนื้อหาให้ตรงกับผู้รับ"
       product={state.retrieved?.productName ?? state.selectedProduct?.productCode ?? null}
+      back={{ label: 'Dashboard', onClick: () => patch({ screen: 'backtest' }) }}
       onStepClick={(n) => { if (n === 1) patch({ screen: 'backtest' }) }}
     >
       <div className="persona-layout">
@@ -242,7 +243,6 @@ export function PersonaScreen({ state, patch }: { state: AppState; patch: Patch 
           </Card>
 
           <FlowNav
-            back={{ label: 'Dashboard', onClick: () => patch({ screen: 'backtest' }) }}
             next={{
               label: 'ตั้งค่า Output',
               onClick: () => patch({ screen: 'scriptConfig' }),

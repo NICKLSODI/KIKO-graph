@@ -1,18 +1,21 @@
 import { createChart, CandlestickSeries, LineStyle, ColorType, type AutoscaleInfoProvider } from 'lightweight-charts'
 import { koTimesFor, levelsAndMarksFor } from './chartData'
 import { backtestDetail } from './engine'
-import { scoreProducts, PROFILE_WEIGHTS, PROFILE_LABELS } from './scoring'
-import type { NoteProduct } from './types'
+import { scoreProducts, PROFILE_WEIGHTS } from './scoring'
+import { DISCLAIMER, factsFor, safeName, warningsFor, windowLabel, type WindowItems } from './reportContent'
 import type { BacktestResult, DetailProduct, ScoredProduct, UnderlyingSeries } from './types'
-import { STRUCTURE_TYPE_LABELS, koObservationLabel, kiObservationLabel } from './types'
+import { STRUCTURE_TYPE_LABELS, productLabel, notionalFor, verdictLabel, seriesVerdict, seriesVerdictLabel } from './types'
 import { LEVEL_COLORS, LEVEL_LABELS } from '../../types'
 import type { DateMark, Level } from '../../types'
 import { buildData, defaultVisibleRange, nearestAxisTime } from '../../components/CandleChart'
 
+// Re-exported so callers keep a single import site for the whole export flow.
+export type { WindowItems } from './reportContent'
+
 const COLUMNS = [
   'Group', 'Rank', 'Product', 'Underlying', 'Structure', 'Coupon(%p.a.)',
   'KI(%)', 'KO(%)', 'Buffer(%)', 'Vol(%)', 'Tenor', 'Issuer',
-  'Score:Aggressive', 'Score:Balanced', 'Score:Save', 'Best-fit customer', 'INVX Pick',
+  'Score:Aggressive', 'Score:Balanced', 'Score:Safe', 'Best-fit customer', 'INVX Pick',
 ]
 
 // Which customer profile a product suits best = the profile under which it scores highest.
@@ -20,7 +23,7 @@ const COLUMNS = [
 const BEST_FIT_LABEL: Record<'aggressive' | 'balanced' | 'save', string> = {
   aggressive: 'เน้นผลตอบแทน (Aggressive)',
   balanced: 'สมดุล (Balanced)',
-  save: 'เน้นปลอดภัย (Save)',
+  save: 'เน้นปลอดภัย (Safe)',
 }
 
 interface ProfileScores { aggressive: number; balanced: number; save: number; bestFit: 'aggressive' | 'balanced' | 'save' }
@@ -62,9 +65,9 @@ function rowsOf(list: DetailProduct[]): (string | number)[][] {
   const line = (s: DetailProduct): (string | number)[] => {
     const ps = scores.get(s.product.id)
     return [
-      s.rank == null ? 'Unranked (non-KIKO)' : s.backtest.verdict === 'pass' ? 'Historical Pass' : 'Historical Knocked',
+      s.rank == null ? 'Unranked (non-KIKO)' : verdictLabel(s.backtest.verdict, REPORT_WINDOW),
       s.rank ?? '',
-      s.product.productCode ?? s.product.sourceFile,
+      productLabel(s.product),
       s.product.underlyings.join(' '),
       STRUCTURE_TYPE_LABELS[s.product.structureType],
       s.product.couponPa ?? '',
@@ -99,8 +102,14 @@ function downloadBlob(blob: Blob, filename: string): void {
   const a = document.createElement('a')
   a.href = url
   a.download = filename
+  document.body.appendChild(a)
   a.click()
-  URL.revokeObjectURL(url)
+  a.remove()
+  // Revoke LATER, not synchronously after click(): for a large download (the batch ZIP)
+  // the browser may still be reading the blob URL when click() returns — revoking now
+  // truncates the file mid-write, producing a corrupt archive that fails to open. Keep the
+  // URL alive well past the time it takes to start (and finish) the download.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 
 export function exportCsv(scored: ScoredProduct[]): void {
@@ -220,25 +229,6 @@ async function renderSeriesImage(candles: UnderlyingSeries['candles'], levels: L
   return canvas.toDataURL('image/png')
 }
 
-function fmt(v: number | null, suffix = '%'): string {
-  return v == null ? '-' : `${v}${suffix}`
-}
-
-function factsFor(s: DetailProduct): [string, string][] {
-  const p = s.product
-  return [
-    ['หุ้นอ้างอิง', p.underlyings.join(', ') || '-'],
-    ['ประเภทโครงสร้าง', STRUCTURE_TYPE_LABELS[p.structureType]],
-    ['Strike', fmt(p.strikePct)],
-    ['Knock-In / Knock-Out', `${p.kiPct ?? '–'} / ${p.koPct ?? '–'}`],
-    ['KO observation', koObservationLabel(p)],
-    ['KI observation', kiObservationLabel(p)],
-    ['Coupon (p.a.)', fmt(p.couponPa)],
-    ['Tenor', p.tenor ?? '-'],
-    ['Issuer', p.issuer ?? '-'],
-  ]
-}
-
 async function productCardHtml(s: DetailProduct, accent: string): Promise<string> {
   const p = s.product
   const bt = s.backtest
@@ -249,13 +239,12 @@ async function productCardHtml(s: DetailProduct, accent: string): Promise<string
     : (
         await Promise.all(
           bt.series.map(async (ser) => {
-            const { levels, marks } = levelsAndMarksFor(ser, koTimes)
+            const { levels, marks } = levelsAndMarksFor(ser, koTimes, { strikePct: p.strikePct, kiPct: p.kiPct, koPct: p.koPct })
             const img = await renderSeriesImage(ser.candles, levels, marks)
             return `
               <div class="series">
                 <div class="series-head">
                   <b>${ser.symbol}</b>
-                  <span class="muted">initial ${ser.initialPrice?.toFixed(2) ?? '-'}</span>
                 </div>
                 <img src="${img}" width="100%" />
               </div>`
@@ -265,6 +254,8 @@ async function productCardHtml(s: DetailProduct, accent: string): Promise<string
 
   const facts = factsFor(s)
   const factsHtml = facts.map(([k, v]) => `<div class="fact"><span class="fact-k">${k}</span><span class="fact-v">${v}</span></div>`).join('')
+  const warns = warningsFor(s)
+  const warnHtml = warns.length ? `<div class="warn">${warns.map((w) => `<div>⚠ ${w}</div>`).join('')}</div>` : ''
 
   // Client-facing document — the internal rank/score never appears here (CSV keeps it).
   // invxPick is the firm's own recommendation stamp (not an internal metric), so it stays.
@@ -273,12 +264,13 @@ async function productCardHtml(s: DetailProduct, accent: string): Promise<string
     <section class="card">
       <div class="card-head" style="border-left-color:${accent}">
         <div class="card-title">
-          <b>${p.productCode ?? p.sourceFile}</b>
+          <b>${productLabel(p)}</b>
           ${invxBadge}
         </div>
         <div class="summary">${p.summary || ''}</div>
       </div>
       <div class="facts">${factsHtml}</div>
+      ${warnHtml}
       <div class="charts">${chartsHtml}</div>
     </section>`
 }
@@ -289,7 +281,7 @@ async function productCardHtml(s: DetailProduct, accent: string): Promise<string
 export async function printProductReport(s: DetailProduct, windowMonths: number): Promise<void> {
   const accent = s.backtest.verdict === 'pass' ? '#0F6E56' : '#993C1D'
   const card = await productCardHtml(s, accent)
-  const title = s.product.productCode ?? s.product.sourceFile
+  const title = productLabel(s.product)
 
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>${title} — KIKO Report</title>
   <style>
@@ -314,14 +306,12 @@ export async function printProductReport(s: DetailProduct, windowMonths: number)
     .series img{display:block;width:100%}
     .badge-invx{color:#854F0B;background:#FAEEDA;border:1px solid #EF9F27;border-radius:999px;padding:2px 10px;font-size:12.5px;font-weight:600}
     .chart-error{color:#854F0B;font-size:13.5px}
+    .warn{margin:12px 18px 0;padding:10px 12px;border:1px solid #EF9F27;background:#FDF3DE;border-radius:8px;color:#854F0B;font-size:12.5px;line-height:1.6;break-inside:avoid;page-break-inside:avoid}
   </style></head><body>
     <h1>${title}</h1>
-    <div class="sub">แบ็คเทสต์ย้อนหลัง ${windowMonths} เดือน • worst-of ราคาปิดจริง • สร้างเมื่อ ${new Date().toLocaleString('th-TH', { dateStyle: 'long', timeStyle: 'short' })}</div>
+    <div class="sub">แบ็คเทสต์ย้อนหลัง ${windowMonths} เดือน • ราคาปิดจริง • สร้างเมื่อ ${new Date().toLocaleString('th-TH', { dateStyle: 'long', timeStyle: 'short' })}</div>
     ${card}
-    <div style="margin-top:20px;padding-top:12px;border-top:1px solid #E2E0D5;font-size:11.5px;color:#6B6A63;line-height:1.6">
-      เอกสารนี้จัดทำจากการแบ็คเทสต์ราคาย้อนหลังและข้อมูลที่สกัดจาก Term Sheet โดยอัตโนมัติ เพื่อประกอบการพิจารณาเบื้องต้นเท่านั้น
-      ไม่ใช่คำแนะนำการลงทุน และผลการดำเนินงานในอดีตไม่ได้เป็นเครื่องยืนยันผลตอบแทนในอนาคต — โปรดตรวจสอบเงื่อนไขกับเอกสารต้นฉบับของผู้ออกตราสารก่อนตัดสินใจ
-    </div>
+    <div style="margin-top:20px;padding-top:12px;border-top:1px solid #E2E0D5;font-size:11.5px;color:#6B6A63;line-height:1.6">${DISCLAIMER}</div>
   </body></html>`
 
   const w = window.open('', '_blank')
@@ -398,12 +388,38 @@ function fittedFactValueFont(ctx: CanvasRenderingContext2D, text: string, maxWid
   }
   return `bold 13px ${FONT_STACK}`
 }
-const F_SERIES_SUB = `19px ${FONT_STACK}`
-const F_FOOTER = `16px ${FONT_STACK}`
+const F_PILL = `bold 17px ${FONT_STACK}`
+// Per-stock verdict pill, same palette as the app's pass/knock badges.
+const PILL_PASS = { fill: '#E3F6EE', border: '#9FE1CB', text: '#0A8F63' }
+const PILL_KNOCK = { fill: '#FDEAEA', border: '#F2B0B0', text: '#D62F2F' }
 
-// Human labels for the backtest windows.
-const WINDOW_LABELS: Record<number, string> = { 6: '6 เดือน', 12: '1 ปี', 24: '2 ปี' }
-const windowLabel = (m: number): string => WINDOW_LABELS[m] ?? `${m} เดือน`
+/** Draw a rounded verdict pill ending at `xRight`; returns nothing (layout is fixed-height). */
+function drawPill(ctx: CanvasRenderingContext2D, text: string, xRight: number, yBaseline: number, knocked: boolean): void {
+  const c = knocked ? PILL_KNOCK : PILL_PASS
+  ctx.font = F_PILL
+  const w = ctx.measureText(text).width + 24
+  const h = 28
+  const x = xRight - w
+  const y = yBaseline - 21
+  ctx.beginPath()
+  ctx.roundRect(x, y, w, h, 14)
+  ctx.fillStyle = c.fill
+  ctx.fill()
+  ctx.strokeStyle = c.border
+  ctx.lineWidth = 1
+  ctx.stroke()
+  ctx.fillStyle = c.text
+  ctx.textAlign = 'center'
+  ctx.fillText(text, x + w / 2, y + 20)
+  ctx.textAlign = 'left'
+}
+const F_FOOTER = `16px ${FONT_STACK}`
+const F_WARN = `18px ${FONT_STACK}`
+const WARN_PAD = 14
+const WARN_LH = 26
+const WARN_BG = '#FDF3DE'
+const WARN_BORDER = '#EF9F27'
+const WARN_TEXT = '#854F0B'
 
 /** One backtest window's result, for a product report that stacks several windows. */
 export interface WindowResult {
@@ -417,7 +433,7 @@ export interface WindowResult {
 async function buildProductJpgCanvas(s: DetailProduct, windows: WindowResult[]): Promise<{ canvas: HTMLCanvasElement; title: string }> {
   const p = s.product
   const koTimes = koTimesFor(p)
-  const title = p.productCode ?? p.sourceFile
+  const title = productLabel(p)
   // INVX's own recommendation stamp — client-facing, unlike the internal score/rank this
   // export deliberately omits. Only the ON-CANVAS heading gets the prefix (reuses the
   // existing wrap/measure logic); `title` itself stays clean since it's also the filename.
@@ -436,13 +452,12 @@ async function buildProductJpgCanvas(s: DetailProduct, windows: WindowResult[]):
         ? []
         : await Promise.all(
             bt.series.map(async (ser) => {
-              const { levels, marks } = levelsAndMarksFor(ser, koTimes)
+              const { levels, marks } = levelsAndMarksFor(ser, koTimes, { strikePct: p.strikePct, kiPct: p.kiPct, koPct: p.koPct })
               const canvas = await renderSeriesCanvas(ser.candles, levels, marks, JPG_CONTENT_W, chartH, 16)
               return { ser, canvas }
             }),
           )
-      const verdictText = bt.verdict === 'pass' ? 'Historical Pass — ไม่เคยชน KI/KO' : 'Historical Knocked — เคยชน KI/KO'
-      return { windowMonths: w.windowMonths, error: bt.error, verdictText, charts }
+      return { windowMonths: w.windowMonths, error: bt.error, charts }
     }),
   )
 
@@ -457,12 +472,12 @@ async function buildProductJpgCanvas(s: DetailProduct, windows: WindowResult[]):
   const subLines = wrapText(meas, subtitle, JPG_CONTENT_W)
   meas.font = F_SUMMARY
   const summaryLines = p.summary ? wrapText(meas, p.summary, JPG_CONTENT_W) : []
+  // Amber warning box (same content the live detail page shows) — sits under the facts grid,
+  // above the charts, so the caveats are read before the picture.
+  meas.font = F_WARN
+  const warnLines = warningsFor(s).flatMap((w) => wrapText(meas, `⚠ ${w}`, JPG_CONTENT_W - WARN_PAD * 2))
   meas.font = F_FOOTER
-  const footerLines = wrapText(
-    meas,
-    'เอกสารนี้จัดทำจากการแบ็คเทสต์ราคาย้อนหลังและข้อมูลที่สกัดจาก Term Sheet โดยอัตโนมัติ เพื่อประกอบการพิจารณาเบื้องต้นเท่านั้น ไม่ใช่คำแนะนำการลงทุน และผลการดำเนินงานในอดีตไม่ได้เป็นเครื่องยืนยันผลตอบแทนในอนาคต',
-    JPG_CONTENT_W,
-  )
+  const footerLines = wrapText(meas, DISCLAIMER, JPG_CONTENT_W)
 
   const TITLE_LH = 46
   const SUB_LH = 28
@@ -484,6 +499,8 @@ async function buildProductJpgCanvas(s: DetailProduct, windows: WindowResult[]):
   h += summaryLines.length * SUMMARY_LH + (summaryLines.length ? 12 : 0)
   h += 4 + 16 // accent rule + gap
   h += factRows * FACT_LH + 12
+  const warnBoxH = warnLines.length ? warnLines.length * WARN_LH + WARN_PAD * 2 : 0
+  if (warnBoxH) h += warnBoxH + 14
   for (const sec of sections) {
     h += WINDOW_HEAD_LH
     if (sec.error) h += SUMMARY_LH
@@ -553,6 +570,22 @@ async function buildProductJpgCanvas(s: DetailProduct, windows: WindowResult[]):
   }
   y += 12
 
+  if (warnBoxH) {
+    ctx.fillStyle = WARN_BG
+    ctx.fillRect(JPG_MARGIN, y, JPG_CONTENT_W, warnBoxH)
+    ctx.strokeStyle = WARN_BORDER
+    ctx.lineWidth = 1
+    ctx.strokeRect(JPG_MARGIN + 0.5, y + 0.5, JPG_CONTENT_W - 1, warnBoxH - 1)
+    ctx.font = F_WARN
+    ctx.fillStyle = WARN_TEXT
+    let wy = y + WARN_PAD
+    for (const l of warnLines) {
+      wy += WARN_LH
+      ctx.fillText(l, JPG_MARGIN + WARN_PAD, wy - 7)
+    }
+    y += warnBoxH + 14
+  }
+
   for (const sec of sections) {
     // Window band: label ("ย้อนหลัง 1 ปี") + verdict on a tinted strip.
     y += WINDOW_HEAD_LH
@@ -561,11 +594,7 @@ async function buildProductJpgCanvas(s: DetailProduct, windows: WindowResult[]):
     ctx.font = F_SERIES_HEAD
     ctx.fillStyle = accent
     ctx.fillText(`ย้อนหลัง ${windowLabel(sec.windowMonths)}`, JPG_MARGIN + 12, y - 10)
-    ctx.font = F_SERIES_SUB
-    ctx.fillStyle = MUTED_COLOR
-    ctx.textAlign = 'right'
-    ctx.fillText(sec.verdictText, JPG_MARGIN + JPG_CONTENT_W - 12, y - 11)
-    ctx.textAlign = 'left'
+    // No basket-level verdict line here — each chart states its own answer on its pill.
 
     if (sec.error) {
       ctx.font = F_SUMMARY
@@ -578,11 +607,12 @@ async function buildProductJpgCanvas(s: DetailProduct, windows: WindowResult[]):
       ctx.fillStyle = TEXT_COLOR
       y += SERIES_HEAD_LH
       ctx.fillText(ser.symbol, JPG_MARGIN, y - 8)
-      const symbolW = ctx.measureText(ser.symbol).width
-      ctx.font = F_SERIES_SUB
-      ctx.fillStyle = MUTED_COLOR
-      const subText = `initial ${ser.initialPrice?.toFixed(2) ?? '-'}`
-      ctx.fillText(subText, JPG_MARGIN + symbolW + 14, y - 8)
+      // Each chart answers for ITS OWN stock — a single basket-level line above three charts
+      // read as if every stock had breached (or held) the barrier.
+      drawPill(ctx, seriesVerdictLabel(seriesVerdict(ser), sec.windowMonths), JPG_MARGIN + JPG_CONTENT_W, y - 8, ser.knockedIn)
+      // No "initial <price>" caption on client-facing images — the chart's own Strike/KO/KI
+      // axis labels already carry every price the reader needs, and the raw reference price
+      // read as jargon next to the ticker.
       ctx.drawImage(chartCanvas, JPG_MARGIN, y, JPG_CONTENT_W, chartH)
       y += chartH + 16
     }
@@ -609,6 +639,10 @@ function canvasToJpgBlob(canvas: HTMLCanvasElement): Promise<Blob | null> {
   return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92))
 }
 
+function canvasToPngBlob(canvas: HTMLCanvasElement): Promise<Blob | null> {
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/png'))
+}
+
 export async function downloadProductJpg(s: DetailProduct, windowMonths: number): Promise<void> {
   const { canvas, title } = await buildProductJpgCanvas(s, [{ windowMonths, backtest: s.backtest }])
   const blob = await canvasToJpgBlob(canvas)
@@ -616,181 +650,125 @@ export async function downloadProductJpg(s: DetailProduct, windowMonths: number)
   downloadBlob(blob, `${title}-kiko.jpg`)
 }
 
-// Paginate the tall report canvas into an A4 PDF (jsPDF lazy-loaded — it's only needed
-// for exports, so it stays out of the main bundle).
-async function canvasToPdfBlob(canvas: HTMLCanvasElement): Promise<Blob> {
-  const { jsPDF } = await import('jspdf')
-  const PAGE_W_MM = 210
-  const PAGE_H_MM = 297
-  const pageHpx = Math.floor(canvas.width * (PAGE_H_MM / PAGE_W_MM))
-  const pages = Math.max(1, Math.ceil(canvas.height / pageHpx))
-  const pdf = new jsPDF({ unit: 'mm', format: 'a4' })
-  for (let i = 0; i < pages; i++) {
-    if (i > 0) pdf.addPage()
-    const sliceH = Math.min(pageHpx, canvas.height - i * pageHpx)
-    const slice = document.createElement('canvas')
-    slice.width = canvas.width
-    slice.height = sliceH
-    const ctx = slice.getContext('2d')!
-    ctx.fillStyle = '#ffffff'
-    ctx.fillRect(0, 0, slice.width, slice.height)
-    ctx.drawImage(canvas, 0, i * pageHpx, canvas.width, sliceH, 0, 0, canvas.width, sliceH)
-    pdf.addImage(slice.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, PAGE_W_MM, sliceH * (PAGE_W_MM / canvas.width))
-  }
-  return pdf.output('blob')
+// Single self-contained .html with live pan/zoom/crosshair charts. Lazy-loaded: that module
+// inlines the 192kB lightweight-charts standalone bundle as a string, which must not sit in
+// the app's main chunk.
+export async function downloadProductInteractiveHtml(s: DetailProduct, windowMonths: number): Promise<void> {
+  const { buildInteractiveHtml } = await import('./interactiveHtml')
+  const { html, title } = buildInteractiveHtml(s, windowMonths)
+  downloadBlob(new Blob([html], { type: 'text/html;charset=utf-8' }), `${safeName(title)}-interactive.html`)
 }
 
-const safeName = (t: string) => t.replace(/[^\w.ก-๙-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'product'
-
-// Every product report shows all three standard backtest windows stacked.
+// The ranking covers all three standard backtest windows.
 export const EXPORT_WINDOWS = [6, 12, 24]
 
-// Backtest one product across all EXPORT_WINDOWS. Prices are cached from the scoring pass,
-// so the extra windows are CPU-only (no extra network) — but each needs its own detail
-// series since candles are cropped per window.
-async function windowsFor(product: DetailProduct['product']): Promise<WindowResult[]> {
-  const out: WindowResult[] = []
-  for (const windowMonths of EXPORT_WINDOWS) {
-    out.push({ windowMonths, backtest: await backtestDetail(product, windowMonths) })
-  }
-  return out
-}
+// Charts in the reports render the 1-year (12-month) window. Stacking 6M/1Y/2Y made the
+// exported image very tall (N underlyings × 3 windows); one window keeps it readable, and
+// the ranking page still shows all three.
+export const REPORT_WINDOW = 12
 
-// One-click batch export, one folder per product:
-//   summary.csv
-//   01-<product>/<product>.pdf + .jpg + -factsheet-th/en.html
-// Each product report stacks all three windows (6M / 1Y / 2Y). Factsheets are included
-// only when the real-data mapper succeeds — the illustrative fallback template must never
-// land in a client-bound zip unnoticed.
 function batchStamp(): string {
   const d = new Date()
   return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
 }
 
-// Build the batch ZIP as a Blob (shared by the download button and the email flow).
-export async function buildBatchZipBlob(
+export const reportHtmlFilename = (): string => `SN-Desk-ranking-${batchStamp()}.html`
+export const batchZipFilename = (): string => `SN-Desk-batch-${batchStamp()}.zip`
+
+/** The whole outbound package. The interactive report is the headline deliverable; the zip
+ *  only carries the per-basket files a human picks out by hand (LINE images, factsheets). */
+export interface BatchPackage {
+  reportHtml: Blob
+  zip: Blob
+}
+
+// One-click batch export. Three folders, nothing else — the desk picks files out of these
+// by hand, so a folder per product just meant more clicking:
+//   summary.csv                  (desk-internal table: rank + all three profile scores)
+//   SN-Desk-ranking-<date>.html  (same interactive report that gets emailed)
+//   png-for-line/01-<product>.png    ← multi-select these straight into a LINE chat
+//   factsheet_th/01-<product>.png   ← factsheet as an image, straight into a chat/LINE
+//   factsheet_en/01-<product>.png
+// Factsheets are included only when the real-data mapper succeeds — the illustrative
+// fallback template must never land in a client-bound zip unnoticed.
+export async function buildBatchPackage(
   list: DetailProduct[],
+  byWindow: WindowItems[],
   onProgress?: (done: number, total: number) => void,
-): Promise<Blob> {
-  const [{ default: JSZip }, { renderFactsheet }] = await Promise.all([
+): Promise<BatchPackage> {
+  const [{ default: JSZip }, { renderFactsheet }, { factsheetPngBlob }, { buildCombinedReportHtml }] = await Promise.all([
     import('jszip'),
     import('../factsheet/adapter'), // lazy — pulls the 145kB render engine only for exports
+    import('../factsheet/exportImage'),
+    import('./interactiveHtml'), // lazy — inlines the 192kB standalone chart bundle as text
   ])
   const zip = new JSZip()
   const ordered = orderForExport(list)
   zip.file('summary.csv', csvText(ordered))
+  const pngFolder = zip.folder('png-for-line')!
+  const fsFolders = { th: zip.folder('factsheet_th')!, en: zip.folder('factsheet_en')! }
+
+  // Chart-ready series, computed once per product and reused for both the LINE image and the
+  // interactive report (prices are already cached from the scoring pass — CPU only).
+  const detailed: DetailProduct[] = []
   let done = 0
   for (const s of ordered) {
     onProgress?.(done, ordered.length)
-    const windows = await windowsFor(s.product)
-    const { canvas, title } = await buildProductJpgCanvas(s, windows)
+    const detail: DetailProduct = { ...s, backtest: await backtestDetail(s.product, REPORT_WINDOW) }
+    detailed.push(detail)
+
+    const { canvas, title } = await buildProductJpgCanvas(detail, [{ windowMonths: REPORT_WINDOW, backtest: detail.backtest }])
     const name = safeName(title)
-    const folder = zip.folder(`${String(done + 1).padStart(2, '0')}-${name}`)!
-    const jpg = await canvasToJpgBlob(canvas)
-    if (jpg) folder.file(`${name}.jpg`, jpg)
-    folder.file(`${name}.pdf`, await canvasToPdfBlob(canvas))
+    const index = String(done + 1).padStart(2, '0')
+    const png = await canvasToPngBlob(canvas)
+    if (png) pngFolder.file(`${index}-${name}.png`, png)
 
     // Factsheet with Spot = latest close per underlying (same data the dashboard button
-    // passes to the factsheet screen). No notional in batch mode — no shares column.
-    // Any window's series carries the same latest closes; use the longest (last) window.
+    // passes to the factsheet screen). Batch mode has no typed notional, so it uses the
+    // desk's standard ticket size for the market — otherwise Min. Subscription, Net Interest
+    // and the shares-for-delivery column drop out of every exported factsheet.
     const spots: Record<string, number> = {}
     let lastTime = 0
-    for (const ser of windows[windows.length - 1].backtest.series) {
+    for (const ser of detail.backtest.series) {
       if (ser.currentPrice != null) spots[ser.symbol] = ser.currentPrice
       const t = ser.candles[ser.candles.length - 1]?.time
       if (t && t > lastTime) lastTime = t
     }
     const spotAsOf = lastTime ? new Date(lastTime * 1000).toISOString().slice(0, 10) : null
     for (const lang of ['th', 'en'] as const) {
-      const fs = renderFactsheet(s.product, lang, undefined, null, spots, spotAsOf)
-      if (fs.real) folder.file(`${name}-factsheet-${lang}.html`, fs.html)
+      const fs = renderFactsheet(detail.product, lang, undefined, notionalFor(detail.product), spots, spotAsOf)
+      if (!fs.real) continue
+      // Image only — the desk sends factsheets through chat/LINE, and a .html attachment
+      // that has to be opened in a browser first was never the file anyone picked.
+      // A rasterizing failure just drops that one sheet; the batch keeps going.
+      try {
+        fsFolders[lang].file(`${index}-${name}.png`, await factsheetPngBlob(fs.html))
+      } catch {
+        /* skip this factsheet */
+      }
     }
     done++
     onProgress?.(done, ordered.length)
   }
-  return zip.generateAsync({ type: 'blob' })
+
+  const html = buildCombinedReportHtml(detailed, byWindow, REPORT_WINDOW)
+  const reportHtml = new Blob([html], { type: 'text/html;charset=utf-8' })
+  // Also inside the zip: some mail gateways strip a loose .html attachment, and the zipped
+  // copy is the fallback that always arrives.
+  zip.file(reportHtmlFilename(), html)
+
+  return { reportHtml, zip: await zip.generateAsync({ type: 'blob' }) }
 }
 
-export async function exportBatchZip(
+/** Download button: saves the interactive report and the zip as two files. */
+export async function exportBatchFiles(
   list: DetailProduct[],
+  byWindow: WindowItems[],
   onProgress?: (done: number, total: number) => void,
 ): Promise<void> {
-  const blob = await buildBatchZipBlob(list, onProgress)
-  downloadBlob(blob, `SN-Desk-batch-${batchStamp()}.zip`)
-}
-
-// ── Ranking screenshots ──────────────────────────────────────────────────────
-// One image per backtest window, each stacking the three risk-profile ranking tables
-// (Aggressive / Balanced / Save). Built by rendering the tables off-screen with the SAME
-// global CSS classes the live dashboard uses (.table-wrap / .rank-chip / .badge) and
-// snapshotting with html2canvas, so the picture matches the on-screen look.
-
-/** One window's already-backtested KIKO items — the caller runs backtestScore per window. */
-export interface WindowItems {
-  windowMonths: number
-  items: { product: NoteProduct; backtest: BacktestResult }[]
-}
-
-const RANK_PROFILES = ['aggressive', 'balanced', 'save'] as const
-const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-const pctOr = (v: number | null) => (v == null ? '-' : `${v}%`)
-
-function rankRowsHtml(group: ScoredProduct[], accent: string): string {
-  if (!group.length) return `<div style="font-size:13px;color:var(--c-muted);padding:8px 12px">— ไม่มีรายการ —</div>`
-  const head = ['Rank', 'Product', 'Underlying', 'Coupon', 'KI / KO', 'Buffer', 'Vol', 'Tenor', 'Issuer', 'Score']
-  const th = 'padding:10px 12px;font-size:12px;font-weight:600;color:var(--c-muted);text-align:left;white-space:nowrap'
-  const td = 'padding:10px 12px;font-size:13px;color:var(--c-text);white-space:nowrap;border-top:1px solid var(--c-border)'
-  const rows = group.map((s) => {
-    const p = s.product
-    const invx = p.invxPick ? ` <span class="badge invx" style="margin-left:6px">💎 INVX Pick</span>` : ''
-    return `<tr>
-      <td style="${td}"><span class="rank-chip${s.rank <= 3 ? ' top' : ''}">${String(s.rank).padStart(2, '0')}</span></td>
-      <td style="${td};font-weight:600">${esc(p.productCode ?? p.sourceFile)}${invx}</td>
-      <td style="${td}">${esc(p.underlyings.join(', ') || '-')}</td>
-      <td style="${td};color:${accent};font-weight:600">${pctOr(p.couponPa)}</td>
-      <td style="${td}">${p.kiPct ?? '–'} / ${p.koPct ?? '–'}</td>
-      <td style="${td}">${s.backtest.bufferPct == null ? '-' : `${s.backtest.bufferPct}%`}</td>
-      <td style="${td}">${s.backtest.volatilityPct == null ? '-' : `${s.backtest.volatilityPct}%`}</td>
-      <td style="${td}">${esc(p.tenor ?? '-')}</td>
-      <td style="${td}">${esc(p.issuer ?? '-')}</td>
-      <td style="${td};font-weight:600">${s.score}</td>
-    </tr>`
-  }).join('')
-  return `<div class="table-wrap"><table>
-    <thead><tr>${head.map((h) => `<th style="${th}">${h}</th>`).join('')}</tr></thead>
-    <tbody>${rows}</tbody></table></div>`
-}
-
-export async function captureRankingImages(byWindow: WindowItems[]): Promise<{ windowMonths: number; blob: Blob }[]> {
-  const html2canvas = (await import('html2canvas')).default
-  const out: { windowMonths: number; blob: Blob }[] = []
-  for (const w of byWindow) {
-    let inner = `<div style="font:700 22px -apple-system,'Segoe UI',Tahoma,sans-serif;color:var(--c-text);margin-bottom:16px">KIKO Ranking — ย้อนหลัง ${windowLabel(w.windowMonths)}</div>`
-    for (const profile of RANK_PROFILES) {
-      const scored = scoreProducts(w.items, PROFILE_WEIGHTS[profile])
-      const pass = scored.filter((s) => s.backtest.verdict === 'pass').sort((a, b) => a.rank - b.rank)
-      const knocked = scored.filter((s) => s.backtest.verdict === 'knocked').sort((a, b) => a.rank - b.rank)
-      inner += `<div style="margin:0 0 22px">
-        <div style="font:600 15px -apple-system,'Segoe UI',Tahoma,sans-serif;color:var(--c-primary);margin-bottom:8px">${esc(PROFILE_LABELS[profile])}</div>
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><span class="badge pass">Historical Pass</span><span style="font-size:12px;color:var(--c-muted)">${pass.length} รายการ</span></div>
-        ${rankRowsHtml(pass, 'var(--c-teal)')}
-        <div style="display:flex;align-items:center;gap:8px;margin:12px 0 6px"><span class="badge knock">Historical Knocked</span><span style="font-size:12px;color:var(--c-muted)">${knocked.length} รายการ</span></div>
-        ${rankRowsHtml(knocked, 'var(--c-coral)')}
-      </div>`
-    }
-    const container = document.createElement('div')
-    container.style.cssText = 'position:fixed;left:-99999px;top:0;width:1180px;box-sizing:border-box;padding:28px;background:#ffffff'
-    container.innerHTML = inner
-    document.body.appendChild(container)
-    try {
-      const canvas = await html2canvas(container, { scale: 2, backgroundColor: '#ffffff', logging: false })
-      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
-      if (blob) out.push({ windowMonths: w.windowMonths, blob })
-    } finally {
-      container.remove()
-    }
-  }
-  return out
+  const pkg = await buildBatchPackage(list, byWindow, onProgress)
+  downloadBlob(pkg.reportHtml, reportHtmlFilename())
+  downloadBlob(pkg.zip, batchZipFilename())
 }
 
 function blobToBase64(blob: Blob): Promise<string> {
@@ -825,9 +803,4 @@ export async function sendEmailNow(
     throw new Error(detail?.detail || `HTTP ${res.status}`)
   }
   return res.json()
-}
-
-export function rankingImageFilename(windowMonths: number): string {
-  const tag = windowMonths === 6 ? '6M' : windowMonths === 12 ? '1Y' : windowMonths === 24 ? '2Y' : `${windowMonths}M`
-  return `ranking-${tag}.png`
 }

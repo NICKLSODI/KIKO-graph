@@ -1,22 +1,23 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { C } from '../../theme'
 import { Screen, Card, NavBtn, IconOptions } from '../../ui/components'
-import { IconUpload, IconSearch, IconBarChart, IconTrophy, IconChevronRight, IconFileText, IconLink, IconAlignLeft, IconCheck } from '../../ui/icons'
+import { IconUpload, IconDownload, IconSearch, IconBarChart, IconTrophy, IconChevronRight, IconFileText, IconAlignLeft, IconCheck, IconMail } from '../../ui/icons'
 import { CandleChart } from '../../components/CandleChart'
-import type { GenerateFile } from '../../api/generate'
-import { extractNote, extractNotesFromTextChunked, type NoteSource } from '../../features/backtest/extract'
+import { EmailChipsInput, isValidEmail, parseEmails } from '../../components/EmailChipsInput'
+import { checkAiHealth, friendlyError, isAuthError, startClaudeLogin, type AiHealth, type GenerateFile } from '../../api/generate'
+import { extractNotesFromSource, type NoteSource } from '../../features/backtest/extract'
 import { koTimesFor, levelsAndMarksFor } from '../../features/backtest/chartData'
 import type { InputMode } from '../../types'
 import { backtestScore, backtestDetail } from '../../features/backtest/engine'
-import { scoreProducts, weightsFor, PROFILE_LABELS, DEFAULT_CUSTOM_WEIGHTS } from '../../features/backtest/scoring'
-import { exportBatchZip, buildBatchZipBlob, captureRankingImages, sendEmailNow, rankingImageFilename, EXPORT_WINDOWS, printProductReport, downloadProductJpg, type WindowItems } from '../../features/backtest/exportReport'
-import type { BacktestResult, DetailProduct, NoteProduct, ProfileKey, ScoredProduct, ScoreWeights } from '../../features/backtest/types'
-import { STRUCTURE_TYPE_LABELS, koObservationLabel, kiObservationLabel } from '../../features/backtest/types'
+import { scoreProducts, weightsFor, PROFILE_LABELS } from '../../features/backtest/scoring'
+import { exportBatchFiles, buildBatchPackage, sendEmailNow, batchZipFilename, reportHtmlFilename, EXPORT_WINDOWS, downloadProductJpg, type WindowItems } from '../../features/backtest/exportReport'
+import type { BacktestResult, DetailProduct, NoteProduct, ProfileKey, ScoredProduct } from '../../features/backtest/types'
+import { STRUCTURE_TYPE_LABELS, koObservationLabel, kiObservationLabel, productLabel, notionalFor, monthlyInterest, sharesForDelivery, verdictLabel, seriesVerdict, seriesVerdictLabel } from '../../features/backtest/types'
 import type { RetrievedProductData } from '../../features/ingest/ingest'
 import type { Patch } from '../../store'
 
 type Phase = 'upload' | 'running' | 'dashboard'
-type SortKey = 'rank' | 'coupon' | 'buffer' | 'vol' | 'tenor'
+type SortKey = 'rank' | 'coupon' | 'strike' | 'ki' | 'ko' | 'vol' | 'tenor'
 
 interface Item {
   product: NoteProduct
@@ -97,7 +98,7 @@ function PipelineStrip({ stage }: { stage: number }) {
 function toRetrieved(p: NoteProduct): RetrievedProductData {
   return {
     summary: p.summary,
-    productName: p.productCode ?? p.sourceFile,
+    productName: productLabel(p),
     productType: STRUCTURE_TYPE_LABELS[p.structureType],
     strike: p.strikePct,
     knockIn: p.kiPct,
@@ -149,8 +150,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   const [phase, setPhase] = useState<Phase>(RESUME ? 'dashboard' : 'upload')
   const [dragging, setDragging] = useState(false)
   const [sources, setSources] = useState<NoteSource[]>([])
-  const [addMode, setAddMode] = useState<InputMode>('file')
-  const [linkDraft, setLinkDraft] = useState('')
+  const [addMode, setAddMode] = useState<InputMode>('text')
   const [textDraft, setTextDraft] = useState('')
   const [progress, setProgress] = useState('')
   const [errors, setErrors] = useState<string[]>([])
@@ -164,21 +164,31 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   const [printing, setPrinting] = useState(false)
   // Batch-zip progress text (null = idle) — shown on the ranking header button.
   const [zipping, setZipping] = useState<string | null>(null)
-  // Email flow: recipients textarea + panel toggle + progress text.
-  // Recipients persist in localStorage — they're usually the same people, so prefill next time.
+  // Email flow: recipient chips + panel toggle + progress text.
+  // Recipients persist in localStorage — they're usually the same people, so prefill next time
+  // (stored comma-joined, which is also what the old free-text field wrote, so it still loads).
   const [emailOpen, setEmailOpen] = useState(false)
-  const [emailRecipients, setEmailRecipients] = useState(() => {
-    try { return localStorage.getItem('kiko.emailRecipients') || '' } catch { return '' }
+  const [emailRecipients, setEmailRecipients] = useState<string[]>(() => {
+    try { return parseEmails(localStorage.getItem('kiko.emailRecipients') || '') } catch { return [] }
+  })
+  // Addresses that were actually sent to before — offered as one-click chips.
+  const [emailHistory, setEmailHistory] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem('kiko.emailHistory') || '[]') as string[] } catch { return [] }
   })
   const [emailing, setEmailing] = useState<string | null>(null)
   const [emailDone, setEmailDone] = useState<string | null>(null)
-  const [backendOk, setBackendOk] = useState<boolean | null>(null)
+  // null = still checking on mount. Gates the analyse button so a logged-out session is
+  // caught BEFORE the user waits through an extraction that cannot possibly succeed.
+  const [aiHealth, setAiHealth] = useState<AiHealth | null>(null)
+  const [recheckingAi, setRecheckingAi] = useState(false)
+  const [loggingIn, setLoggingIn] = useState(false)
+  const [loginNote, setLoginNote] = useState<string | null>(null)
   const [savedSession, setSavedSession] = useState<{ prods: NoteProduct[]; wm: number } | null>(() => loadSession())
 
   const [view, setView] = useState<'summary' | 'detail'>(RESUME?.view ?? 'summary')
-  const [profile, setProfile] = useState<ProfileKey>('balanced')
-  const [custom, setCustom] = useState<ScoreWeights>(DEFAULT_CUSTOM_WEIGHTS)
-  const [sortKey, setSortKey] = useState<SortKey>('rank')
+  const [profile, setProfile] = useState<ProfileKey>('all')
+  // Default order: lowest KI% first (safest), Strike% as tiebreak — what the desk scans for.
+  const [sortKey, setSortKey] = useState<SortKey>('ki')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
   const [selectedId, setSelectedId] = useState<string | null>(RESUME?.selectedId ?? null)
   // Lifted so the factsheet button (in the detail toolbar) can carry it to the store.
@@ -199,7 +209,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   // just listed without a rank.
   const kikoItems = useMemo(() => items.filter((i) => i.product.structureType === 'kiko'), [items])
   const otherItems = useMemo(() => items.filter((i) => i.product.structureType !== 'kiko'), [items])
-  const scored = useMemo(() => scoreProducts(kikoItems, weightsFor(profile, custom)), [kikoItems, profile, custom])
+  const scored = useMemo(() => scoreProducts(kikoItems, weightsFor(profile)), [kikoItems, profile])
   const selected: DetailProduct | null =
     scored.find((s) => s.product.id === selectedId) ??
     (() => {
@@ -208,11 +218,49 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     })()
 
   useEffect(() => {
-    fetch('http://localhost:8000/api/generate/health')
-      .then((r) => r.json())
-      .then((d) => setBackendOk(!!d?.available))
-      .catch(() => setBackendOk(false))
+    checkAiHealth().then(setAiHealth)
   }, [])
+
+  async function recheckAi(force = true): Promise<AiHealth> {
+    setRecheckingAi(true)
+    try {
+      const h = await checkAiHealth(force)
+      setAiHealth(h)
+      return h
+    } finally {
+      setRecheckingAi(false)
+    }
+  }
+
+  // Opens the login window on this machine, then polls the health probe so the banner
+  // clears by itself once the browser flow finishes — the user shouldn't have to guess
+  // when to press "ตรวจสอบอีกครั้ง". Gives up polling after ~2 min; the button still works.
+  async function loginToClaude() {
+    setLoggingIn(true)
+    setLoginNote(null)
+    try {
+      await startClaudeLogin()
+      setLoginNote('เปิดหน้าต่างล็อกอินแล้ว — ทำตามขั้นตอนในเบราว์เซอร์/หน้าต่างสีดำที่เพิ่งเด้งขึ้นมา ระบบจะตรวจสอบให้เองเมื่อเสร็จ')
+      for (let i = 0; i < 24; i++) {
+        await new Promise((r) => setTimeout(r, 5000))
+        const h = await checkAiHealth(true)
+        setAiHealth(h)
+        if (h.auth === 'ok') {
+          setLoginNote('เข้าสู่ระบบสำเร็จ — เริ่มวิเคราะห์ได้เลย')
+          return
+        }
+      }
+      setLoginNote('ยังไม่พบการเข้าสู่ระบบที่สำเร็จ — ล็อกอินให้เสร็จแล้วกด "ตรวจสอบอีกครั้ง"')
+    } catch (err) {
+      setLoginNote(friendlyError(err))
+    } finally {
+      setLoggingIn(false)
+    }
+  }
+
+  // "unknown" is deliberately NOT blocking: a slow cold-start probe must not stop someone
+  // whose login is actually fine. Only a confirmed dead login / missing CLI / dead backend does.
+  const aiBlocked = aiHealth != null && (aiHealth.offline || aiHealth.auth === 'expired' || aiHealth.auth === 'no-cli')
 
   async function recompute(prods: NoteProduct[], wm: number) {
     setRecomputing(true)
@@ -252,23 +300,32 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   }
 
   async function run() {
-    // Drafts still sitting in the text/link inputs count automatically — pasting a
+    // A draft still sitting in the text input counts automatically — pasting a
     // summary and hitting เริ่มวิเคราะห์ works without the "+ เพิ่มข้อความ" step.
     const pending: NoteSource[] = []
     const text = textDraft.trim()
     if (text) pending.push({ kind: 'text', text, label: `ข้อความ #${sources.filter((s) => s.kind === 'text').length + 1}` })
-    const link = linkDraft.trim()
-    if (link) pending.push({ kind: 'link', link, label: link })
     const all = [...sources, ...pending]
     if (all.length === 0) return
+
+    // Preflight: the login can die while the tab sits open, so the mount-time check isn't
+    // enough. Verify before extracting — a 2s check beats a 3-minute failure the user
+    // can't interpret.
+    setErrors([])
+    setProgress('ตรวจสอบการเชื่อมต่อ AI...')
+    setPhase('running')
+    const health = await recheckAi(false)
+    if (health.offline || health.auth === 'expired' || health.auth === 'no-cli') {
+      setPhase('upload')
+      setProgress('')
+      return // the upload screen's panel already explains this one, in Thai, with the fix
+    }
+
     if (pending.length) {
       setSources(all)
       setTextDraft('')
-      setLinkDraft('')
     }
 
-    setPhase('running')
-    setErrors([])
     const errs: string[] = []
     // One source can yield MANY products (a pasted desk listing → N products), so each
     // slot holds an array that gets flattened afterwards.
@@ -280,29 +337,41 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     const CONCURRENCY = 3
     let started = 0
     let done = 0
+    // A login that dies mid-batch fails every remaining source the same way. Abort the
+    // whole run at the first one and send the user back to the panel that explains it.
+    let authDied = false
     setProgress(`สกัดข้อมูล 0/${all.length}`)
     async function worker() {
-      while (started < all.length) {
+      while (started < all.length && !authDied) {
         const i = started++
         const source = all[i]
         try {
-          if (source.kind === 'text') {
-            // Large desk listings are split into small chunks + extracted concurrently so a
-            // 30-product paste doesn't hit the 180s single-call timeout.
-            results[i] = await extractNotesFromTextChunked(source.text, source.label, () => crypto.randomUUID())
-          } else {
-            const id = crypto.randomUUID()
-            results[i] = [await extractNote(source, id)]
-            if (source.kind === 'file') nextFileById[id] = source.file
-          }
+          // One source can hold MANY products: a pasted desk listing (chunked internally),
+          // or a single term-sheet file/link whose table has several baskets (one per row).
+          const prods = await extractNotesFromSource(source, () => crypto.randomUUID(), (msg) => errs.push(friendlyError(msg)))
+          results[i] = prods
+          // Map every product from this file back to it, so each basket can re-generate its
+          // factsheet later from the same upload.
+          if (source.kind === 'file') for (const p of prods) nextFileById[p.id] = source.file
         } catch (err) {
-          errs.push(err instanceof Error ? err.message : String(err))
+          if (isAuthError(err)) {
+            authDied = true
+            return
+          }
+          errs.push(friendlyError(err))
         }
         done++
         setProgress(`สกัดข้อมูล ${done}/${all.length}`)
       }
     }
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, all.length) }, worker))
+
+    if (authDied) {
+      await recheckAi(true) // refresh the banner so it shows the login fix, not a raw error
+      setPhase('upload')
+      setProgress('')
+      return
+    }
 
     const prods = results.flat()
     setProducts(prods)
@@ -332,13 +401,6 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     })
   }
 
-  function addLinkSource() {
-    const link = linkDraft.trim()
-    if (!link) return
-    setSources((prev) => [...prev, { kind: 'link', link, label: link }])
-    setLinkDraft('')
-  }
-
   function removeSource(i: number) {
     setSources((prev) => prev.filter((_, idx) => idx !== i))
   }
@@ -356,30 +418,54 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     setPreview(null)
   }
 
-  // Everything on screen (ranked KIKO + unranked others) → summary.csv + per-product
-  // JPG + PDF in one zip. Each product report stacks all three windows (6M/1Y/2Y); series
-  // are computed on the fly per window (prices already cached — CPU only).
+  // Everything on screen, ranked KIKO + unranked others, in canonical export order.
+  const exportList = (): DetailProduct[] => [...scored, ...otherItems.map((it) => ({ ...it, score: null, rank: null }))]
+
+  // Ranking source for the interactive report: the KIKO items scored under every export
+  // window. Prices are cached from the dashboard's own pass, so this is CPU only.
+  async function rankingByWindow(setStatus: (s: string) => void): Promise<WindowItems[]> {
+    const kikoProducts = products.filter((p) => p.structureType === 'kiko')
+    const byWindow: WindowItems[] = []
+    for (const wm of EXPORT_WINDOWS) {
+      setStatus(`แบ็คเทสต์ย้อนหลัง ${wm} เดือน...`)
+      const wItems: WindowItems['items'] = []
+      for (const p of kikoProducts) wItems.push({ product: p, backtest: await backtestScore(p, wm) })
+      byWindow.push({ windowMonths: wm, items: wItems })
+    }
+    return byWindow
+  }
+
+  // Downloads the same two files the email sends: the interactive ranking report and the zip
+  // of per-basket files (LINE images + factsheets + summary.csv).
   async function handleExportAllZip() {
-    const list: DetailProduct[] = [...scored, ...otherItems.map((it) => ({ ...it, score: null, rank: null }))]
+    const list = exportList()
     if (!list.length || zipping) return
     setZipping('เตรียมไฟล์...')
     try {
-      await exportBatchZip(list, (done, total) => setZipping(`สร้างไฟล์ ${done}/${total}...`))
+      const byWindow = await rankingByWindow(setZipping)
+      await exportBatchFiles(list, byWindow, (done, total) => setZipping(`สร้างไฟล์ ${done}/${total}...`))
     } catch (err) {
-      setErrors((prev) => [...prev, `ดาวน์โหลด ZIP ไม่สำเร็จ: ${err instanceof Error ? err.message : String(err)}`])
+      setErrors((prev) => [...prev, `ดาวน์โหลดไม่สำเร็จ: ${friendlyError(err)}`])
     } finally {
       setZipping(null)
     }
   }
 
-  // Full email package: capture the ranking (3 windows × 3 profiles) + build the batch ZIP,
-  // then AUTO-SEND for real via the Outlook COM object (attaches every file + .Send()), the
-  // same pattern as fundconnext_portfolio.py. Sending is irreversible, so we confirm the
-  // recipient count with the user first.
+  // Full email package: one interactive HTML report (ranking page, 3 windows × 3 profiles,
+  // click through to each basket's charts) + the ZIP of per-basket files, then AUTO-SEND for
+  // real via the Outlook COM object (attaches every file + .Send()), the same pattern as
+  // fundconnext_portfolio.py. Sending is irreversible, so we confirm the recipient count first.
   async function handleSendEmail() {
-    const recips = emailRecipients.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean)
+    const recips = emailRecipients
     if (!recips.length) {
       setErrors((prev) => [...prev, 'กรอกอีเมลผู้รับอย่างน้อย 1 คนก่อนส่ง'])
+      return
+    }
+    // The chip input flags these in red, but re-check here so a bad address can never
+    // reach Outlook (the send is irreversible and a bounce is silent).
+    const bad = recips.filter((r) => !isValidEmail(r))
+    if (bad.length) {
+      setErrors((prev) => [...prev, `อีเมลผู้รับรูปแบบไม่ถูกต้อง: ${bad.join(', ')}`])
       return
     }
     if (emailing) return
@@ -388,53 +474,74 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     setEmailDone(null)
     setEmailing('เตรียมข้อมูล...')
     try {
-      // Backtest KIKO items across all export windows (prices cached — CPU only).
-      const kikoProducts = products.filter((p) => p.structureType === 'kiko')
-      const byWindow: WindowItems[] = []
-      for (const wm of EXPORT_WINDOWS) {
-        setEmailing(`แบ็คเทสต์ย้อนหลัง ${wm} เดือน...`)
-        const wItems: WindowItems['items'] = []
-        for (const p of kikoProducts) wItems.push({ product: p, backtest: await backtestScore(p, wm) })
-        byWindow.push({ windowMonths: wm, items: wItems })
-      }
-      setEmailing('แคปรูป ranking...')
-      const images = await captureRankingImages(byWindow)
-      setEmailing('สร้างไฟล์ ZIP...')
-      const list: DetailProduct[] = [...scored, ...otherItems.map((it) => ({ ...it, score: null, rank: null }))]
-      const zipBlob = await buildBatchZipBlob(list, (d, t) => setEmailing(`สร้างไฟล์ ${d}/${t}...`))
+      const byWindow = await rankingByWindow(setEmailing)
+      setEmailing('สร้างรายงาน...')
+      const pkg = await buildBatchPackage(exportList(), byWindow, (d, t) => setEmailing(`สร้างไฟล์ ${d}/${t}...`))
       setEmailing('กำลังส่งผ่าน Outlook...')
       const today = new Date().toLocaleDateString('th-TH', { dateStyle: 'long' })
       const subject = `SN·Desk — สรุปและจัดอันดับตราสารโครงสร้าง ${today}`
+      // If the batch was built from pasted text (a desk listing), include that raw source
+      // verbatim in the body so recipients see the original message the ranking came from.
+      const escapeHtml = (s: string) => s.replace(/[&<>]/g, (c) => (c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;'))
+      const sourceText = sources.filter((s) => s.kind === 'text').map((s) => s.text.trim()).filter(Boolean).join('\n\n──────────\n\n')
       const bodyHtml = [
         `<p>เรียนทีมงาน,</p>`,
         `<p>แนบสรุปและจัดอันดับ KIKO ประจำวันที่ ${today}</p>`,
         `<ul>`,
-        `<li>รูป ranking ย้อนหลัง 6 เดือน / 1 ปี / 2 ปี (แต่ละรูปมีตาราง Aggressive / Balanced / Save)</li>`,
-        `<li>ไฟล์ ZIP: รายงานราย product (PDF + รูป + factsheet) และตารางสรุป CSV</li>`,
+        `<li><b>${reportHtmlFilename()}</b> — เปิดไฟล์นี้ในเบราว์เซอร์: หน้าจัดอันดับ เลือกช่วงย้อนหลัง 6 เดือน / 1 ปี / 2 ปี และโปรไฟล์คะแนน All / Aggressive / Safe ได้ (All จัดเรียงเองได้ Aggressive กับ Safe ตำแหน่งคงที่) กดชื่อ product เพื่อเข้าไปดูรายละเอียดและกราฟที่เลื่อน/ซูมได้</li>`,
+        `<li>ไฟล์ ZIP: <code>png-for-line/</code> รูปส่งไลน์, <code>factsheet_th/</code> + <code>factsheet_en/</code> factsheet รายตัวเป็นรูป .png, และ <code>summary.csv</code> (มีสำเนาไฟล์รายงานด้านบนอยู่ใน ZIP ด้วย)</li>`,
         `</ul>`,
-        `<p style="color:#888;font-size:12px">อีเมลนี้สร้างและส่งอัตโนมัติจาก SN·Desk</p>`,
+        ...(sourceText ? [
+          `<p style="font-weight:600;margin:16px 0 6px">ข้อมูลตั้งต้น (ข้อความที่สกัด):</p>`,
+          `<pre style="white-space:pre-wrap;font-family:inherit;background:#f5f5f7;border:1px solid #e0e0e5;border-radius:8px;padding:12px;font-size:13px;color:#222;margin:0">${escapeHtml(sourceText)}</pre>`,
+        ] : []),
+        `<p style="color:#888;font-size:12px;margin-top:16px">อีเมลนี้สร้างและส่งอัตโนมัติจาก SN·Desk</p>`,
       ].join('')
-      const d = new Date()
-      const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
       const attachments = [
-        ...images.map((im) => ({ filename: rankingImageFilename(im.windowMonths), blob: im.blob })),
-        { filename: `SN-Desk-batch-${stamp}.zip`, blob: zipBlob },
+        { filename: reportHtmlFilename(), blob: pkg.reportHtml },
+        { filename: batchZipFilename(), blob: pkg.zip },
       ]
-      const result = await sendEmailNow(recips, subject, bodyHtml, attachments)
-      setEmailDone(`✅ ส่งอีเมลแล้ว (${result.recipients.length} คน, ไฟล์แนบ ${result.attachments} รายการ) ผ่าน Outlook`)
+      // Outlook may not be ready on the first try (still launching / mid-login) — the backend
+      // returns the "เปิด Outlook ไม่ได้ หรือ login ไม่เสร็จ" 503 in that case. Auto-retry the
+      // send a few times (attachments are already built, so a retry is cheap) instead of
+      // making the user re-run the whole capture+zip flow.
+      let result: { recipients: string[]; attachments: number } | null = null
+      const MAX_TRIES = 3
+      for (let attempt = 1; ; attempt++) {
+        try {
+          if (attempt > 1) setEmailing(`Outlook ยังไม่พร้อม — ลองส่งใหม่ครั้งที่ ${attempt}/${MAX_TRIES}...`)
+          result = await sendEmailNow(recips, subject, bodyHtml, attachments)
+          break
+        } catch (err) {
+          const notReady = err instanceof Error && (err.message.includes('เปิด Outlook') || err.message.includes('login ไม่เสร็จ'))
+          if (notReady && attempt < MAX_TRIES) {
+            await new Promise((r) => setTimeout(r, 5000))
+            continue
+          }
+          throw err
+        }
+      }
+      setEmailDone(`✅ ส่งอีเมลแล้ว (${result!.recipients.length} คน, ไฟล์แนบ ${result!.attachments} รายการ) ผ่าน Outlook`)
+      // Remember who was actually mailed so next time they're a one-click chip.
+      setEmailHistory((prev) => {
+        const merged = [...recips, ...prev.filter((p) => !recips.some((r) => r.toLowerCase() === p.toLowerCase()))].slice(0, 12)
+        try { localStorage.setItem('kiko.emailHistory', JSON.stringify(merged)) } catch { /* ignore quota/privacy-mode */ }
+        return merged
+      })
     } catch (err) {
-      setErrors((prev) => [...prev, `ส่งอีเมลไม่สำเร็จ: ${err instanceof Error ? err.message : String(err)}`])
+      setErrors((prev) => [...prev, `ส่งอีเมลไม่สำเร็จ: ${friendlyError(err)}`])
     } finally {
       setEmailing(null)
     }
   }
 
-  async function handleExportSelected(format: 'pdf' | 'jpg') {
+  // Per-product export is the LINE-ready chart image. PDF and interactive HTML are still
+  // produced by the batch package, which is where they are actually used.
+  async function handleExportSelected() {
     if (!selected) return
     setPrinting(true)
     try {
-      if (format === 'pdf') await printProductReport(selected, windowMonths)
-      else await downloadProductJpg(selected, windowMonths)
+      await downloadProductJpg(selected, windowMonths)
     } finally {
       setPrinting(false)
     }
@@ -449,21 +556,35 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
     else {
       setSortKey(key)
-      setSortDir(key === 'rank' ? 'asc' : 'desc')
+      // Coupon: higher is better → default desc. Everything else (rank/ki/ko/strike/vol/tenor):
+      // lower is better/safer → default asc.
+      setSortDir(key === 'coupon' ? 'desc' : 'asc')
     }
   }
 
   function sortRows(group: ScoredProduct[]): ScoredProduct[] {
+    // Aggressive / Safe: the order IS the answer (rank by that profile's weights), so it is
+    // fixed and the headers aren't clickable — same rule the exported HTML report follows.
+    if (profile !== 'all') return [...group].sort((a, b) => a.rank - b.rank)
     const val = (s: ScoredProduct): number => {
       switch (sortKey) {
         case 'rank': return s.rank
         case 'coupon': return s.product.couponPa ?? -Infinity
-        case 'buffer': return s.backtest.bufferPct ?? -Infinity
+        case 'strike': return s.product.strikePct ?? Infinity
+        case 'ki': return s.product.kiPct ?? Infinity
+        case 'ko': return s.product.koPct ?? Infinity
         case 'vol': return s.backtest.volatilityPct ?? Infinity
         case 'tenor': return s.product.tenorMonths ?? Infinity
       }
     }
-    return [...group].sort((a, b) => (sortDir === 'asc' ? val(a) - val(b) : val(b) - val(a)))
+    return [...group].sort((a, b) => {
+      const d = sortDir === 'asc' ? val(a) - val(b) : val(b) - val(a)
+      if (d !== 0) return d
+      // Stable tiebreak = the desk's default preference: lowest KI% then lowest Strike%.
+      const ki = (a.product.kiPct ?? Infinity) - (b.product.kiPct ?? Infinity)
+      if (ki !== 0) return ki
+      return (a.product.strikePct ?? Infinity) - (b.product.strikePct ?? Infinity)
+    })
   }
 
   // Commit one or more typed terms (comma-separated) into filter chips — uppercased,
@@ -494,10 +615,56 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
         <Card>
           {phase === 'upload' && (
             <>
-              {backendOk === false && (
-                <div style={{ fontSize: 12.5, color: C.coral, background: C.coralLight, border: `1px solid ${C.coralBorder}`, borderRadius: 8, padding: '10px 14px', marginBottom: 14, lineHeight: 1.6 }}>
-                  เชื่อมต่อ backend ไม่ได้ (localhost:8000) — เปิดเซิร์ฟเวอร์ก่อน มิฉะนั้นการสกัดข้อมูล/โหลดราคาจะไม่ทำงาน
+              {/* Setup problems are shown BEFORE any work starts, with the exact fix and a
+                  recheck button — a desk user must never discover a dead login only after
+                  waiting through a failed extraction. */}
+              {aiBlocked && aiHealth && (
+                <div style={{ background: C.coralLight, border: `1px solid ${C.coralBorder}`, borderRadius: 10, padding: '14px 16px', marginBottom: 14, lineHeight: 1.65 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: C.coral, marginBottom: 6 }}>
+                    ⚠ ยังเริ่มวิเคราะห์ไม่ได้
+                  </div>
+                  <div style={{ fontSize: 13, color: C.text, marginBottom: 10 }}>{aiHealth.reason}</div>
+                  {aiHealth.fix && (
+                    <div style={{ fontSize: 13, color: C.text, marginBottom: 12 }}>
+                      <b>วิธีแก้:</b> {aiHealth.fix}
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                    {/* Expired login is the ONE failure a desk user can fix themselves, so it
+                        gets a button that opens the login window for them rather than a
+                        command to type. Missing CLI / dead backend can't be fixed from here. */}
+                    {aiHealth.auth === 'expired' && (
+                      <button
+                        className="btn-ghost"
+                        onClick={loginToClaude}
+                        disabled={loggingIn}
+                        style={{ padding: '7px 16px', borderRadius: 8, border: 'none', background: C.coral, color: C.white, fontSize: 13, fontWeight: 700, cursor: loggingIn ? 'default' : 'pointer' }}
+                      >
+                        {loggingIn ? 'กำลังเปิดหน้าต่างล็อกอิน...' : 'เข้าสู่ระบบ Claude'}
+                      </button>
+                    )}
+                    <button
+                      className="btn-ghost"
+                      onClick={() => recheckAi(true)}
+                      disabled={recheckingAi}
+                      style={{ padding: '7px 16px', borderRadius: 8, border: `1px solid ${C.coralBorder}`, background: C.white, color: C.coral, fontSize: 13, fontWeight: 600, cursor: recheckingAi ? 'default' : 'pointer' }}
+                    >
+                      {recheckingAi ? 'กำลังตรวจสอบ...' : 'ตรวจสอบอีกครั้ง'}
+                    </button>
+                    <span style={{ fontSize: 12, color: C.muted }}>แก้เองไม่ได้ ดู MAINTENANCE.md หรือเปิด Claude Code (โปรเจกต์ Structure Note Summary Website)</span>
+                  </div>
+                  {loginNote && (
+                    <div style={{ fontSize: 12.5, color: C.text, marginTop: 10 }}>{loginNote}</div>
+                  )}
                 </div>
+              )}
+              {/* Login just succeeded: the blocking banner is gone, so the confirmation needs
+                  its own home or the user is left wondering whether it worked. */}
+              {!aiBlocked && loginNote && (
+                <div style={{ fontSize: 12.5, color: C.teal, background: C.tealLight, border: `1px solid ${C.tealBorder}`, borderRadius: 8, padding: '10px 14px', marginBottom: 14 }}>{loginNote}</div>
+              )}
+              {aiHealth == null && (
+                <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 14 }}>กำลังตรวจสอบการเชื่อมต่อ AI...</div>
               )}
               {savedSession && (
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, fontSize: 12.5, color: C.teal, background: C.tealLight, border: `1px solid ${C.tealBorder}`, borderRadius: 8, padding: '10px 14px', marginBottom: 14 }}>
@@ -511,9 +678,8 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
                 onChange={(v) => setAddMode(v as InputMode)}
                 minWidth={150}
                 options={[
-                  { value: 'file', icon: <IconFileText size={19} />, label: 'ไฟล์เอกสาร', sub: 'PDF / รูปภาพ' },
-                  { value: 'link', icon: <IconLink size={19} />, label: 'ลิงก์อ้างอิง', sub: 'Web URL' },
                   { value: 'text', icon: <IconAlignLeft size={19} />, label: 'ข้อความสรุป', sub: 'วางจากอีเมล / แชท' },
+                  { value: 'file', icon: <IconFileText size={19} />, label: 'ไฟล์เอกสาร', sub: 'PDF / รูปภาพ' },
                 ]}
               />
 
@@ -540,18 +706,6 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
                     <span style={{ fontSize: 12, color: C.muted }}>PDF, PNG, JPG — เลือกได้หลายไฟล์พร้อมกัน</span>
                     <input type="file" accept=".pdf,.png,.jpg,.jpeg,.webp" multiple style={{ display: 'none' }} onChange={(e) => { if (e.target.files?.length) addFileSources(e.target.files) }} />
                   </label>
-                )}
-                {addMode === 'link' && (
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <input
-                      value={linkDraft}
-                      onChange={(e) => setLinkDraft(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') addLinkSource() }}
-                      placeholder="https://..."
-                      style={{ flex: 1, padding: '12px 14px', borderRadius: 10, border: `1px solid ${C.border}`, fontSize: 14, boxSizing: 'border-box' }}
-                    />
-                    <button className="btn-ghost" onClick={addLinkSource} disabled={!linkDraft.trim()} style={{ padding: '0 16px', borderRadius: 10, border: `1px solid ${C.primaryBorder}`, background: C.primaryLight, color: C.primary, fontSize: 13.5, cursor: 'pointer' }}>+ เพิ่มลิงก์</button>
-                  </div>
                 )}
                 {addMode === 'text' && (
                   <div>
@@ -583,10 +737,11 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
               )}
 
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 12, marginTop: 20 }}>
-                <NavBtn onClick={run} disabled={sources.length + (textDraft.trim() ? 1 : 0) + (linkDraft.trim() ? 1 : 0) === 0}>
+                <NavBtn onClick={run} disabled={aiBlocked || sources.length + (textDraft.trim() ? 1 : 0) === 0}>
                   {(() => {
-                    // Pending drafts count toward the total so the button reflects what run() will do.
-                    const n = sources.length + (textDraft.trim() ? 1 : 0) + (linkDraft.trim() ? 1 : 0)
+                    // The pending text draft counts toward the total so the button reflects what run() will do.
+                    if (aiBlocked) return 'แก้ปัญหาด้านบนก่อน'
+                    const n = sources.length + (textDraft.trim() ? 1 : 0)
                     return n ? `เริ่มวิเคราะห์ ${n} รายการ →` : 'เพิ่มข้อมูลก่อน'
                   })()}
                 </NavBtn>
@@ -620,11 +775,27 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
 
   const th = { padding: '10px 12px', fontSize: 12, fontWeight: 600, color: C.muted, textAlign: 'left' as const, whiteSpace: 'nowrap' as const }
   const td = { padding: '10px 12px', fontSize: 13.5, color: C.text, borderTop: `1px solid ${C.border}` }
-  const sortableTh = (label: string, key: SortKey) => (
-    <th style={{ ...th, cursor: 'pointer' }} onClick={() => toggleSort(key)}>
-      {label} {sortKey === key ? (sortDir === 'asc' ? '▲' : '▼') : ''}
-    </th>
-  )
+  // Every sortable header carries a dotted underline + a ⇅ glyph (▲/▼ when active) so it's
+  // obvious it can be clicked, without having to guess-and-click first. Under Aggressive /
+  // Safe the ranking is fixed, so the header renders plain — no affordance, no click.
+  const canSort = profile === 'all'
+  const sortableTh = (label: string, key: SortKey) => {
+    if (!canSort) return <th style={th} title={`เรียงตามคะแนนโปรไฟล์ ${PROFILE_LABELS[profile]} — ตำแหน่งคงที่`}>{label}</th>
+    const active = sortKey === key
+    return (
+      <th
+        style={{ ...th, cursor: 'pointer', userSelect: 'none', color: active ? C.primary : C.muted, textDecoration: 'underline dotted', textUnderlineOffset: 3 }}
+        onClick={() => toggleSort(key)}
+        title="คลิกเพื่อจัดเรียง"
+      >
+        {label} <span style={{ fontSize: 10, opacity: active ? 1 : 0.45 }}>{active ? (sortDir === 'asc' ? '▲' : '▼') : '⇅'}</span>
+      </th>
+    )
+  }
+  // Colour cues for the desk: a low Strike (deep discount) and a low KI (safer barrier) are
+  // the "good" rows to spot fast.
+  const strikeStyle = (v: number | null) => (v != null && v <= 90 ? { color: C.teal, fontWeight: 700 } : {})
+  const kiCellStyle = (v: number | null) => (v != null && v < 60 ? { color: C.teal, fontWeight: 700, background: C.tealLight } : {})
 
   function renderTable(group: ScoredProduct[], accent: string) {
     if (group.length === 0) return <div style={{ fontSize: 13, color: C.muted, padding: '8px 12px' }}>— ไม่มีรายการ —</div>
@@ -637,12 +808,12 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
               <th style={th}>Product</th>
               <th style={th}>Underlying</th>
               {sortableTh('Coupon', 'coupon')}
-              <th style={th}>KI / KO</th>
-              {sortableTh('Buffer', 'buffer')}
-              {sortableTh('Vol', 'vol')}
+              {sortableTh('Strike', 'strike')}
+              {sortableTh('KI', 'ki')}
+              {sortableTh('KO', 'ko')}
               {sortableTh('Tenor', 'tenor')}
               <th style={th}>Issuer</th>
-              <th style={th}>Score</th>
+              {profile !== 'all' && <th style={th}>Score</th>}
               <th style={th}></th>
             </tr>
           </thead>
@@ -651,7 +822,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
               <tr key={s.product.id} className="row-hover">
                 <td style={td}><span className={`rank-chip${s.rank <= 3 ? ' top' : ''}`}>{String(s.rank).padStart(2, '0')}</span></td>
                 <td style={{ ...td, fontWeight: 600 }}>
-                  {s.product.productCode ?? s.product.sourceFile}
+                  {productLabel(s.product)}
                   {s.product.invxPick && <span className="badge invx" style={{ marginLeft: 8 }} title="ผลิตภัณฑ์ที่ INVX แนะนำ">💎 INVX Pick</span>}
                 </td>
                 <td style={td}>
@@ -668,12 +839,12 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
                       })}
                 </td>
                 <td className="num" style={{ ...td, color: accent, fontWeight: 600 }}>{fmtPct(s.product.couponPa)}</td>
-                <td className="num" style={td}>{kiko(s.product)}</td>
-                <td className="num" style={td}>{s.backtest.bufferPct == null ? '-' : `${s.backtest.bufferPct}%`}</td>
-                <td className="num" style={td}>{s.backtest.volatilityPct == null ? '-' : `${s.backtest.volatilityPct}%`}</td>
+                <td className="num" style={{ ...td, ...strikeStyle(s.product.strikePct) }}>{fmtPct(s.product.strikePct)}</td>
+                <td className="num" style={{ ...td, ...kiCellStyle(s.product.kiPct) }}>{fmtPct(s.product.kiPct)}</td>
+                <td className="num" style={td}>{fmtPct(s.product.koPct)}</td>
                 <td className="num" style={td}>{s.product.tenor ?? '-'}</td>
                 <td style={td}>{s.product.issuer ?? '-'}</td>
-                <td className="num" style={{ ...td, fontWeight: 600 }}>{s.score}</td>
+                {profile !== 'all' && <td className="num" style={{ ...td, fontWeight: 600 }}>{s.score}</td>}
                 <td style={{ ...td, display: 'flex', gap: 6 }}>
                   <button className="btn-ghost" onClick={() => viewDetail(s.product.id)} style={{ padding: '5px 12px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.primary, fontSize: 12.5, cursor: 'pointer' }}>ดูรายละเอียด →</button>
                   {fileById[s.product.id] && (
@@ -723,7 +894,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
                 onClick={() => {
                   if (!selected) return
                   const p = selected.product
-                  patch({ selectedProduct: p, retrieved: toRetrieved(p), targetProduct: p.productCode ?? p.sourceFile, screen: 'persona' })
+                  patch({ selectedProduct: p, retrieved: toRetrieved(p), targetProduct: productLabel(p), screen: 'persona' })
                 }}
                 style={{ padding: '9px 14px', borderRadius: 8, border: `1px solid ${C.primaryBorder}`, background: C.primaryLight, color: C.primary, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}
               >
@@ -756,22 +927,18 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
               >
                 📄 สร้าง Factsheet
               </button>
-              <select
-                value=""
+              {/* One export the desk actually uses — the chart image that gets sent on LINE. */}
+              <button
                 disabled={printing || !selected}
-                onChange={(e) => {
-                  const format = e.target.value as 'pdf' | 'jpg'
-                  if (format) handleExportSelected(format)
-                }}
-                style={{ padding: '9px 14px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.text, color: C.white, fontSize: 13, fontWeight: 600, cursor: printing || !selected ? 'default' : 'pointer' }}
+                onClick={() => handleExportSelected()}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 7, padding: '9px 14px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.text, color: C.white, fontSize: 13, fontWeight: 600, cursor: printing || !selected ? 'default' : 'pointer', opacity: printing || !selected ? 0.6 : 1 }}
               >
-                <option value="" disabled>{printing ? 'กำลังสร้างไฟล์...' : 'ดาวน์โหลดตะกร้านี้'}</option>
-                <option value="pdf">บันทึกเป็น PDF</option>
-                <option value="jpg">บันทึกเป็น JPG (ส่งไลน์)</option>
-              </select>
+                <IconDownload size={14} />
+                {printing ? 'กำลังสร้างรูป...' : 'โหลดรูปกราฟสำหรับส่ง LINE'}
+              </button>
             </div>
           </div>
-          <DetailGraphView key={selected?.product.id ?? 'none'} selected={selected} hasFile={!!(selected && fileById[selected.product.id])} onPreview={() => selected && openPreview(selected.product.id)} notional={notional} setNotional={setNotional} isLoadingChart={loadingChartId === selected?.product.id} />
+          <DetailGraphView key={selected?.product.id ?? 'none'} selected={selected} showScore={profile !== 'all'} hasFile={!!(selected && fileById[selected.product.id])} onPreview={() => selected && openPreview(selected.product.id)} notional={notional} setNotional={setNotional} isLoadingChart={loadingChartId === selected?.product.id} windowMonths={windowMonths} />
         </Card>
 
         {preview && (
@@ -815,19 +982,24 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
               className="btn-ghost"
               onClick={handleExportAllZip}
               disabled={!!zipping || items.length === 0}
-              title="ดาวน์โหลดทุกผลิตภัณฑ์เป็นไฟล์เดียว: ตารางสรุป CSV + PDF และ JPG ของแต่ละตัว"
+              title="ดาวน์โหลด 2 ไฟล์: รายงาน HTML (หน้าจัดอันดับ กดเข้าไปดูกราฟแต่ละตะกร้าได้) + ZIP (รูปส่งไลน์, factsheet TH/EN, summary.csv)"
               style={{ padding: '7px 14px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: zipping ? C.muted : C.text, fontSize: 12.5, cursor: zipping ? 'wait' : 'pointer' }}
             >
-              {zipping ?? '⬇ ZIP ทั้งหมด'}
+              {zipping ?? '⬇ ดาวน์โหลดทั้งหมด'}
             </button>
             <button
-              className="btn-ghost"
               onClick={() => setEmailOpen((v) => !v)}
               disabled={items.length === 0}
-              title="แคปหน้า ranking (6M/1Y/2Y) + ZIP แล้วส่งอีเมลอัตโนมัติผ่าน Outlook (แนบไฟล์ครบ)"
-              style={{ padding: '7px 14px', borderRadius: 8, border: `1px solid ${emailOpen ? C.primaryBorder : C.border}`, background: emailOpen ? C.primaryLight : C.white, color: emailOpen ? C.primary : C.text, fontSize: 12.5, cursor: 'pointer' }}
+              title="สร้างรายงาน HTML (จัดอันดับ 6M/1Y/2Y + กราฟรายตะกร้า) + ZIP แล้วส่งอีเมลอัตโนมัติผ่าน Outlook"
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 7, padding: '9px 18px', borderRadius: 8,
+                border: `1px solid ${C.primary}`, background: C.primary, color: C.onPrimary,
+                fontSize: 13, fontWeight: 700, cursor: items.length === 0 ? 'not-allowed' : 'pointer',
+                opacity: items.length === 0 ? 0.5 : 1,
+                boxShadow: emailOpen ? `0 0 0 3px ${C.primaryLight}` : '0 1px 3px rgba(0,0,0,0.18)',
+              }}
             >
-              ✉ ส่งอีเมล
+              <IconMail size={15} />ส่งอีเมล
             </button>
             <button
               className="btn-ghost"
@@ -848,20 +1020,20 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
           <div style={{ marginTop: 12, padding: 14, borderRadius: 10, border: `1px solid ${C.primaryBorder}`, background: C.primaryLight }}>
             <div style={{ fontSize: 13, fontWeight: 600, color: C.text, marginBottom: 6 }}>ส่งรายงานทางอีเมลอัตโนมัติ (Outlook)</div>
             <div style={{ fontSize: 12, color: C.muted, marginBottom: 8, lineHeight: 1.6 }}>
-              ระบบจะแคปหน้า ranking ทั้ง 3 ช่วง (6 เดือน / 1 ปี / 2 ปี) + สร้าง ZIP รายงาน แล้ว<b>ส่งอีเมลจริงทันที</b>ผ่าน Outlook พร้อมแนบไฟล์ครบทุกไฟล์ (รูป + ZIP) — มีหน้าต่างยืนยันก่อนส่ง (ส่งแล้วยกเลิกไม่ได้ · ต้องเปิด Outlook ค้างไว้ + login แล้ว)
+              ระบบจะสร้าง<b>รายงาน HTML ไฟล์เดียว</b> (หน้าจัดอันดับ 6 เดือน / 1 ปี / 2 ปี กดชื่อ product เข้าไปดูกราฟที่เลื่อน/ซูมได้) + ZIP (รูปส่งไลน์, factsheet TH/EN, summary.csv) แล้ว<b>ส่งอีเมลจริงทันที</b>ผ่าน Outlook — มีหน้าต่างยืนยันก่อนส่ง (ส่งแล้วยกเลิกไม่ได้ · ต้องเปิด Outlook ค้างไว้ + login แล้ว)
             </div>
-            <textarea
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 5 }}>ผู้รับ</label>
+            <EmailChipsInput
               value={emailRecipients}
-              onChange={(e) => {
-                setEmailRecipients(e.target.value)
-                try { localStorage.setItem('kiko.emailRecipients', e.target.value) } catch { /* ignore quota/privacy-mode */ }
+              onChange={(next) => {
+                setEmailRecipients(next)
+                try { localStorage.setItem('kiko.emailRecipients', next.join(', ')) } catch { /* ignore quota/privacy-mode */ }
               }}
-              placeholder="อีเมลผู้รับ คั่นด้วย , หรือขึ้นบรรทัดใหม่&#10;เช่น a@invx.com, b@invx.com"
-              rows={3}
-              style={{ width: '100%', padding: '8px 10px', borderRadius: 8, border: `1px solid ${C.border}`, fontSize: 13, boxSizing: 'border-box', resize: 'vertical', fontFamily: 'inherit', marginBottom: 8 }}
+              history={emailHistory}
+              placeholder="พิมพ์อีเมลแล้วกด Enter — วางหลายอีเมลพร้อมกันได้ เช่น a@invx.com"
             />
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <NavBtn onClick={handleSendEmail} disabled={!!emailing || !emailRecipients.trim()}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
+              <NavBtn onClick={handleSendEmail} disabled={!!emailing || !emailRecipients.length || emailRecipients.some((r) => !isValidEmail(r))}>
                 {emailing ?? 'ส่งอีเมลอัตโนมัติทันที'}
               </NavBtn>
               {emailDone && <span style={{ fontSize: 12, color: C.teal, lineHeight: 1.5 }}>{emailDone}</span>}
@@ -876,25 +1048,25 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
             <div className="s">KIKO {kikoItems.length} · อื่นๆ {otherItems.length} · แบ็คเทสต์ {windowMonths} เดือน</div>
           </div>
           <div className="tile">
-            <div className="k">Historical Pass (KIKO)</div>
+            <div className="k">KI ยังลึกกว่าราคาต่ำสุด</div>
             <div className="v" style={{ color: 'var(--c-teal)' }}>{passGroup.length}</div>
-            <div className="s">ไม่เคยชน KI/KO</div>
+            <div className="s">{verdictLabel('pass', windowMonths)}</div>
           </div>
           <div className="tile">
-            <div className="k">Historical Knocked (KIKO)</div>
+            <div className="k">KI อยู่สูงกว่าราคาต่ำสุด</div>
             <div className="v" style={{ color: 'var(--c-coral)' }}>{knockedGroup.length}</div>
-            <div className="s">เคยชน KI/KO ในช่วงที่ดู</div>
+            <div className="s">{verdictLabel('knocked', windowMonths)}</div>
           </div>
           <div className="tile">
             <div className="k">อันดับ 1 (Pass)</div>
             <div className="v">{bestPass ? bestPass.score : '–'}</div>
-            <div className="s" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bestPass ? (bestPass.product.productCode ?? bestPass.product.sourceFile) : 'ไม่มีรายการ Pass'}</div>
+            <div className="s" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bestPass ? productLabel(bestPass.product) : 'ไม่มีรายการ Pass'}</div>
           </div>
         </div>
 
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8, alignItems: 'center' }}>
           <span className="overline" style={{ marginRight: 4 }}>โปรไฟล์คะแนน</span>
-          {(['aggressive', 'balanced', 'save', 'custom'] as ProfileKey[]).map((p) => {
+          {(['all', 'aggressive', 'save'] as ProfileKey[]).map((p) => {
             const sel = profile === p
             return (
               <button key={p} className="btn-ghost" aria-pressed={sel} onClick={() => setProfile(p)} style={{ padding: '6px 13px', borderRadius: 999, fontSize: 12.5, cursor: 'pointer', border: `1px solid ${sel ? C.primary : C.border}`, background: sel ? C.primary : C.white, color: sel ? C.onPrimary : C.text, fontWeight: sel ? 600 : 400 }}>
@@ -903,20 +1075,9 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
             )
           })}
         </div>
-        {profile === 'custom' && (
-          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12, fontSize: 12.5, color: C.muted, alignItems: 'center' }}>
-            {(['coupon', 'buffer', 'tenor', 'volatility'] as const).map((k) => (
-              <label key={k} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                {k}
-                <input type="number" value={custom[k]} min={0} step={0.1} onChange={(e) => setCustom((w) => ({ ...w, [k]: Number(e.target.value) }))} style={{ width: 60, padding: '4px 6px', borderRadius: 6, border: `1px solid ${C.border}` }} />
-              </label>
-            ))}
-          </div>
-        )}
-
         {errors.length > 0 && (
           <div style={{ fontSize: 12.5, color: C.amber, background: C.amberLight, border: `1px solid ${C.amberBorder}`, borderRadius: 8, padding: '8px 12px', margin: '4px 0 12px' }}>
-            {errors.length} ไฟล์สกัดไม่สำเร็จ: {errors.join(' | ')}
+            พบปัญหาในการสกัดข้อมูล {errors.length} รายการ: {errors.join(' | ')}
           </div>
         )}
 
@@ -956,18 +1117,18 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
           <span style={{ fontSize: 12.5, color: C.muted }}>{kikoItems.length} รายการ — จัดอันดับตามโปรไฟล์คะแนนที่เลือก{stockChips.length ? ` · กรอง ${stockChips.join(', ')}` : ''}</span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '10px 0 8px' }}>
-          <span className="badge pass">Historical Pass</span>
-          <span style={{ fontSize: 12.5, color: C.muted }}>{passShown.length} รายการ — ไม่เคยชน KI/KO</span>
+          <span className="badge pass">{verdictLabel('pass', windowMonths)}</span>
+          <span style={{ fontSize: 12.5, color: C.muted }}>{passShown.length} รายการ</span>
         </div>
         {renderTable(passShown, C.teal)}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '20px 0 8px' }}>
-          <span className="badge knock">Historical Knocked</span>
-          <span style={{ fontSize: 12.5, color: C.muted }}>{knockedShown.length} รายการ — เคยชน KI/KO</span>
+          <span className="badge knock">{verdictLabel('knocked', windowMonths)}</span>
+          <span style={{ fontSize: 12.5, color: C.muted }}>{knockedShown.length} รายการ</span>
         </div>
         {renderTable(knockedShown, C.coral)}
 
         <div style={{ fontSize: 11.5, color: C.muted, marginTop: 16, lineHeight: 1.6 }}>
-          Buffer = ระยะ % ของหุ้นอ่อนสุดจากระดับ KI ปัจจุบัน • Vol = ความผันผวนต่อปีของหุ้นที่ผันผวนสุด • เฉพาะวันสังเกตการณ์ KO ที่ผ่านมาแล้วเท่านั้นที่ถูกนำมาตัดสิน
+          คลิกหัวคอลัมน์ที่มีขีดเส้นใต้ (⇅) เพื่อจัดเรียง • เริ่มต้นเรียงตาม KI ต่ำสุด แล้ว Strike ต่ำสุด • <span style={{ color: C.teal, fontWeight: 700 }}>สีเขียว</span> = Strike ≤ 90% หรือ KI &lt; 60% (ยิ่งต่ำยิ่งปลอดภัย) • เฉพาะวันสังเกตการณ์ KO ที่ผ่านมาแล้วเท่านั้นที่ถูกนำมาตัดสิน
         </div>
       </Card>
 
@@ -992,7 +1153,6 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
                     <th style={th}>Underlying</th>
                     <th style={th}>Coupon</th>
                     <th style={th}>KI / KO</th>
-                    <th style={th}>Buffer</th>
                     <th style={th}>Vol</th>
                     <th style={th}>Tenor</th>
                     <th style={th}>Issuer</th>
@@ -1005,13 +1165,12 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
                     <tr key={it.product.id} className="row-hover">
                       <td style={td}><span className="badge plain">{STRUCTURE_TYPE_LABELS[it.product.structureType]}</span></td>
                       <td style={{ ...td, fontWeight: 600 }}>
-                        {it.product.productCode ?? it.product.sourceFile}
+                        {productLabel(it.product)}
                         {it.product.invxPick && <span className="badge invx" style={{ marginLeft: 8 }} title="ผลิตภัณฑ์ที่ INVX แนะนำ">💎 INVX Pick</span>}
                       </td>
                       <td style={td}>{it.product.underlyings.join(', ') || '-'}</td>
                       <td className="num" style={td}>{fmtPct(it.product.couponPa)}</td>
                       <td className="num" style={td}>{kiko(it.product)}</td>
-                      <td className="num" style={td}>{it.backtest.bufferPct == null ? '-' : `${it.backtest.bufferPct}%`}</td>
                       <td className="num" style={td}>{it.backtest.volatilityPct == null ? '-' : `${it.backtest.volatilityPct}%`}</td>
                       <td className="num" style={td}>{it.product.tenor ?? '-'}</td>
                       <td style={td}>{it.product.issuer ?? '-'}</td>
@@ -1055,7 +1214,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   )
 }
 
-function DetailGraphView({ selected, hasFile, onPreview, notional, setNotional, isLoadingChart }: { selected: DetailProduct | null; hasFile: boolean; onPreview: () => void; notional: string; setNotional: (v: string) => void; isLoadingChart: boolean }) {
+function DetailGraphView({ selected, showScore, hasFile, onPreview, notional, setNotional, isLoadingChart, windowMonths }: { selected: DetailProduct | null; showScore: boolean; hasFile: boolean; onPreview: () => void; notional: string; setNotional: (v: string) => void; isLoadingChart: boolean; windowMonths: number }) {
   if (!selected) {
     return (
       <div style={{ textAlign: 'center', padding: '36px 0', color: C.muted }}>
@@ -1073,13 +1232,23 @@ function DetailGraphView({ selected, hasFile, onPreview, notional, setNotional, 
   const hasNotional = notional.trim() !== '' && Number.isFinite(notionalNum) && notionalNum > 0
   const notionalCurrency = p.market === 'thai' ? 'บาท' : 'USD'
 
-  // Standard desk ticket size per market — always this default when a product's detail
-  // opens (this component remounts per product, keyed by product id, so this fires once
-  // per product view). USD 30,000 for foreign underlyings, THB 1,000,000 for Thai ones.
+  // Prefilled when a product's detail opens (this component remounts per product, keyed by
+  // product id, so this fires once per product view): the amount the document itself stated
+  // when it printed one, otherwise the desk's standard ticket size for the market
+  // (THB 1,000,000 / USD 30,000). The IC can still type over it.
   useEffect(() => {
-    setNotional(p.market === 'thai' ? '1,000,000' : '30,000')
+    setNotional(notionalFor(p).toLocaleString('en-US'))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // The number the desk leads with: interest per month on the notional. Thai notes are shown
+  // net of 15% WHT (what lands in the account); foreign-currency notes gross, since Thai WHT
+  // must not be asserted on a non-THB deal.
+  const monthly = monthlyInterest(p, hasNotional ? notionalNum : notionalFor(p))
+  const monthlyAmount = monthly
+    ? `${monthly.currency} ${monthly.amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : null
+  const notionalNumDisplay = `${monthly?.currency ?? (p.market === 'thai' ? 'THB' : 'USD')} ${(hasNotional ? notionalNum : notionalFor(p)).toLocaleString('en-US')}`
 
   const koObsText = (() => {
     const explicit = p.koObservationDates.length ? p.koObservationDates : p.observationDates
@@ -1099,27 +1268,49 @@ function DetailGraphView({ selected, hasFile, onPreview, notional, setNotional, 
   const ulTh = { padding: '9px 10px', fontSize: 11.5, fontWeight: 700, color: C.onPrimary, textAlign: 'left' as const, whiteSpace: 'nowrap' as const, background: C.primary }
   const ulTd = { padding: '9px 10px', fontSize: 13, color: C.text, whiteSpace: 'nowrap' as const }
 
+  const vf = p.variantFields
+  const hasKi = p.kiPct != null
+  // Twin Win / dual-barrier: no single koPct, but an Upper/Lower KO pair from variantFields.
+  const koPair = p.koPct == null && !!(vf?.upperKO || vf?.lowerKO)
+  // Structure-specific terms present in the doc but not covered by the KIKO fields above —
+  // rendered only when non-null, so a Sharkfin shows PR/Min Redemption and a Twin Win shows
+  // Upper/Lower KO, without leaving empty rows on a plain KIKO.
+  const extraTerms: [string, string | null][] = [
+    ['Participation Rate', vf?.participation ?? null],
+    ['Upper KO', vf?.upperKO ?? null],
+    ['Lower KO', vf?.lowerKO ?? null],
+    ['KO Barrier', p.koPct == null ? (vf?.ko ?? null) : null],
+    ['Knock-In', hasKi ? null : (vf?.knockIn ?? null)],
+    ['Min Redemption Level', vf?.minRedemption ?? null],
+    ['Coupon Barrier', vf?.couponBarrier ?? null],
+    ['Bonus Coupon', vf?.bonus ?? null],
+    ['KO Rebate', vf?.koRebate ?? null],
+    ['Minimum Coupon', vf?.minCoupon ?? null],
+    ['Settlement', vf?.settlement === 'cash' ? 'Cash' : vf?.settlement === 'physical' ? 'Physical' : null],
+    ['Redemption upon', vf?.redemptionUpon ?? null],
+  ]
+
   return (
     <div>
       {/* Header: name + status + score */}
       <div style={{ display: 'flex', alignItems: 'stretch', gap: 16, flexWrap: 'wrap', marginBottom: 6 }}>
         <div style={{ flex: 1, minWidth: 240 }}>
           <div className="overline">รายละเอียดผลิตภัณฑ์</div>
-          <div style={{ fontSize: 22, fontWeight: 700, color: C.text, letterSpacing: '-0.01em', lineHeight: 1.35, margin: '2px 0 10px' }}>{p.productCode ?? p.sourceFile}</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: C.text, letterSpacing: '-0.01em', lineHeight: 1.35, margin: '2px 0 10px' }}>{productLabel(p)}</div>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
             {p.invxPick && <span className="badge invx" title="ผลิตภัณฑ์ที่ INVX แนะนำ">💎 INVX Pick</span>}
             <span className={`badge ${bt.verdict === 'pass' ? 'pass' : 'knock'}`}>
-              {bt.verdict === 'pass' ? 'Historical Pass' : `Knocked${bt.knockedIn ? ' · KI' : ''}${bt.knockedOut ? ' · KO' : ''}`}
+              {verdictLabel(bt.verdict, windowMonths)}
             </span>
             <span className="badge plain">{STRUCTURE_TYPE_LABELS[p.structureType]}</span>
-            <span className="badge plain">KO: {koObservationLabel(p)}</span>
+            <span className="badge plain">KO: {vf?.koObservation ?? koObservationLabel(p)}</span>
             <span className="badge plain">{p.market === 'thai' ? 'หุ้นไทย' : 'ต่างประเทศ'}</span>
             {hasFile && (
               <button className="btn-ghost" onClick={onPreview} style={{ padding: '3px 10px', borderRadius: 999, border: `1px solid ${C.border}`, background: C.white, color: C.muted, fontSize: 11.5, cursor: 'pointer' }}>เปิดไฟล์ต้นฉบับ</button>
             )}
           </div>
         </div>
-        {selected.score != null && (
+        {selected.score != null && showScore && (
           <div style={{ textAlign: 'center', padding: '12px 22px', borderRadius: 10, border: `1px solid ${C.tealBorder}`, background: C.tealLight, alignSelf: 'flex-start' }}>
             <div className="overline" style={{ color: C.teal }}>คะแนนรวม</div>
             <div className="num" style={{ fontSize: 34, fontWeight: 600, color: C.teal, lineHeight: 1.15 }}>{selected.score}</div>
@@ -1128,23 +1319,50 @@ function DetailGraphView({ selected, hasFile, onPreview, notional, setNotional, 
         )}
       </div>
 
-      {/* Key metrics strip */}
+      {/* Key metrics strip — structure-aware: KI + Buffer only when the note has a KI barrier;
+          KO shows a single level or an Upper/Lower pair; Participation appears for PR structures
+          (Sharkfin/Booster). */}
       <div className="tiles" style={{ margin: '16px 0 4px' }}>
         <div className="tile">
           <div className="k">Coupon (p.a.)</div>
           <div className="v">{fmtPct(p.couponPa)}</div>
           <div className="s">ดอกเบี้ยต่อปี</div>
         </div>
-        <div className="tile">
-          <div className="k">KI / KO</div>
-          <div className="v" style={{ fontSize: 18 }}>{kiko(p)}</div>
-          <div className="s">% ของราคาเริ่มต้น</div>
-        </div>
-        <div className="tile">
-          <div className="k">Buffer จาก KI</div>
-          <div className="v" style={{ color: bt.bufferPct != null && bt.bufferPct < 10 ? 'var(--c-coral)' : 'var(--c-teal)' }}>{bt.bufferPct == null ? '–' : `${bt.bufferPct}%`}</div>
-          <div className="s">หุ้นอ่อนสุด ณ ปัจจุบัน</div>
-        </div>
+        {monthly && (
+          <div className="tile">
+            <div className="k">{monthly.net ? 'ดอกเบี้ยสุทธิ/เดือน' : 'ดอกเบี้ย/เดือน'}</div>
+            <div className="v" style={{ fontSize: 17, color: 'var(--c-teal)' }}>{monthlyAmount}</div>
+            <div className="s">{monthly.net ? `จาก Notional ${notionalNumDisplay} · หลังหัก WHT 15%` : `จาก Notional ${notionalNumDisplay} · ก่อนหักภาษี`}</div>
+          </div>
+        )}
+        {hasKi && (
+          <div className="tile">
+            <div className="k">Knock-In</div>
+            <div className="v">{fmtPct(p.kiPct)}</div>
+            <div className="s">% ของราคาเริ่มต้น</div>
+          </div>
+        )}
+        {(p.koPct != null || koPair) && (
+          <div className="tile">
+            <div className="k">{koPair ? 'Upper / Lower KO' : 'Knock-Out'}</div>
+            <div className="v" style={{ fontSize: koPair ? 16 : undefined }}>{koPair ? `${vf?.upperKO ?? '–'} / ${vf?.lowerKO ?? '–'}` : fmtPct(p.koPct)}</div>
+            <div className="s">% ของราคาเริ่มต้น</div>
+          </div>
+        )}
+        {hasKi && (
+          <div className="tile">
+            <div className="k">Buffer จาก KI</div>
+            <div className="v" style={{ color: bt.bufferPct != null && bt.bufferPct < 10 ? 'var(--c-coral)' : 'var(--c-teal)' }}>{bt.bufferPct == null ? '–' : `${bt.bufferPct}%`}</div>
+            <div className="s">หุ้นอ่อนสุด ณ ปัจจุบัน</div>
+          </div>
+        )}
+        {vf?.participation && (
+          <div className="tile">
+            <div className="k">Participation</div>
+            <div className="v">{vf.participation}</div>
+            <div className="s">อัตราการมีส่วนร่วม</div>
+          </div>
+        )}
         <div className="tile">
           <div className="k">Volatility</div>
           <div className="v">{bt.volatilityPct == null ? '–' : `${bt.volatilityPct}%`}</div>
@@ -1157,11 +1375,12 @@ function DetailGraphView({ selected, hasFile, onPreview, notional, setNotional, 
       <div className="fact-grid">
         {fact('ผู้ออก (Issuer)', p.issuer ?? '-')}
         {fact('หุ้นอ้างอิง', p.underlyings.join(', ') || '-')}
-        {fact('Strike', fmtPct(p.strikePct), true)}
+        {p.strikePct != null && fact('Strike', fmtPct(p.strikePct), true)}
         {fact('อายุสัญญา (Tenor)', p.tenor ?? '-', true)}
         {fact('วันทำสัญญา (Fixing)', p.fixingDate ?? '-', true)}
-        {fact('KO observation', koObservationLabel(p))}
-        {fact('KI observation', kiObservationLabel(p))}
+        {fact('KO observation', vf?.koObservation ?? koObservationLabel(p))}
+        {(hasKi || vf?.kiObservation) && fact('KI observation', vf?.kiObservation ?? kiObservationLabel(p))}
+        {extraTerms.filter(([, v]) => v).map(([k, v]) => <Fragment key={k}>{fact(k, v!, true)}</Fragment>)}
       </div>
 
       {/* Per-underlying strike/KO/KI table */}
@@ -1177,14 +1396,25 @@ function DetailGraphView({ selected, hasFile, onPreview, notional, setNotional, 
           onChange={(e) => setNotional(e.target.value)}
           style={{ padding: '5px 10px', borderRadius: 8, border: `1px solid ${C.border}`, fontSize: 13, width: 150 }}
         />
-        <span style={{ color: C.muted, fontSize: 12 }}>ใช้คำนวณ "จำนวนหุ้นที่ต้องส่งมอบ" และมูลค่าจองซื้อ/ดอกเบี้ยสุทธิใน Factsheet — ไม่กระทบการแบ็คเทสต์</span>
+        <span style={{ color: C.muted, fontSize: 12 }}>
+          {p.notional != null ? 'ค่าเริ่มต้นจากที่ระบุไว้ในเอกสาร — ' : ''}ใช้คำนวณ "จำนวนหุ้นที่ต้องส่งมอบ" ดอกเบี้ยต่อเดือน และมูลค่าจองซื้อใน Factsheet — ไม่กระทบการแบ็คเทสต์
+        </span>
       </div>
+      {monthly && (
+        <div style={{ fontSize: 12.5, color: C.text, background: C.tealLight, border: `1px solid ${C.tealBorder}`, borderRadius: 8, padding: '8px 12px', marginBottom: 10 }}>
+          <b>วิธีคำนวณ:</b> {notionalNumDisplay} × {fmtPct(p.couponPa)} / 12{monthly.net ? ' × (1 − WHT 15%)' : ''} = <b>{monthlyAmount}</b> ต่อเดือน
+          {!monthly.net && <span style={{ color: C.muted }}> (ก่อนหักภาษี)</span>}
+        </div>
+      )}
       <div style={{ overflowX: 'auto', marginBottom: 8, border: `1px solid ${C.border}`, borderRadius: 10 }}>
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr>
               <th style={{ ...ulTh, borderTopLeftRadius: 9 }}>หุ้นอ้างอิง</th>
-              <th style={ulTh}>Spot Price</th>
+              {/* The reference price the levels are computed from — the term sheet's own stated
+                  price when it printed one, else the close on the fixing date (latest close if
+                  the document gave no date). Not "today's quote", so don't label it Spot. */}
+              <th style={ulTh} title="ราคาอ้างอิงที่ใช้คำนวณ Strike / KO / KI">Reference Spot</th>
               <th style={ulTh}>Strike Level (%)</th>
               <th style={ulTh}>Strike Price</th>
               <th style={ulTh}>KO Level (%)</th>
@@ -1197,7 +1427,7 @@ function DetailGraphView({ selected, hasFile, onPreview, notional, setNotional, 
           </thead>
           <tbody>
             {bt.series.map((s, i) => {
-              const shares = hasNotional && s.strikeLevel ? Math.round(notionalNum / s.strikeLevel) : null
+              const shares = sharesForDelivery(hasNotional ? notionalNum : notionalFor(p), s.strikeLevel, p.market)
               const rowBg = i % 2 === 1 ? C.bg : C.white
               return (
                 <tr key={s.symbol} style={{ background: rowBg }}>
@@ -1221,8 +1451,9 @@ function DetailGraphView({ selected, hasFile, onPreview, notional, setNotional, 
       {/* Backtest result */}
       <div className="section-h"><span className="overline">ผลแบ็คเทสต์</span></div>
       <div className="fact-grid">
-        {fact('ผลย้อนหลัง', bt.error ? 'ผิดพลาด' : `${bt.verdict === 'pass' ? 'Pass — ไม่เคยชน KI/KO' : 'Knocked — เคยชน KI/KO'}`)}
-        {fact('ช่วงที่ทดสอบ', `${bt.windowMonths} เดือนย้อนหลัง`, true)}
+        {/* No basket-level KI verdict line — every chart below carries its own per-stock chip. */}
+        {fact('ช่วงที่ทดสอบ', `${bt.windowMonths} เดือนย้อนหลัง`)}
+        {bt.error ? fact('สถานะ', 'ผิดพลาด', true) : null}
       </div>
       <div className="fact-item" style={{ borderBottom: 'none' }}>
         <span className="fk">วันสังเกตการณ์ KO</span>
@@ -1277,14 +1508,18 @@ function DetailGraphView({ selected, hasFile, onPreview, notional, setNotional, 
             </div>
           </div>
           {bt.series.map((s) => {
-            const { levels, marks } = levelsAndMarksFor(s, koTimes)
+            const { levels, marks } = levelsAndMarksFor(s, koTimes, { strikePct: p.strikePct, kiPct: p.kiPct, koPct: p.koPct })
             return (
               <div key={s.symbol} style={{ marginBottom: 28, border: `1px solid ${C.border}`, borderRadius: 10, overflow: 'hidden' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', background: C.bg, borderBottom: `1px solid ${C.border}`, flexWrap: 'wrap' }}>
                   <span className="num" style={{ fontSize: 14, fontWeight: 600, color: C.text }}>{s.symbol}</span>
-                  <span className="num" style={{ fontSize: 12, color: C.muted }}>initial {s.initialPrice?.toFixed(2) ?? '-'}</span>
                   <span className="num" style={{ fontSize: 12, color: C.muted }}>ปัจจุบัน {s.currentPrice?.toFixed(2) ?? '-'}</span>
-                  {s.knockedIn && <span className="badge knock" style={{ marginLeft: 'auto' }}>เคยชน KI</span>}
+                  {/* Per-stock, always shown: green = this stock's KI sits below its own lowest
+                      close, red = the price traded through it. A basket-level line alone read as
+                      if it described every chart under it. */}
+                  <span className={`badge ${s.knockedIn ? 'knock' : 'pass'}`} style={{ marginLeft: 'auto' }}>
+                    {seriesVerdictLabel(seriesVerdict(s))}
+                  </span>
                 </div>
                 <div style={{ padding: '8px 8px 0' }}>
                   <CandleChart candles={s.candles} levels={levels} dateMarks={marks} showEma50={showEma50} showEma200={showEma200} />

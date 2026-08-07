@@ -29,13 +29,14 @@ export interface VariantFields {
   minCoupon: string | null
   coupon: string | null
   settlement: string | null
+  redemptionUpon: string | null
 }
 
 export const VF_KEYS: (keyof VariantFields)[] = [
   'family', 'underlyings', 'tenor', 'issuer', 'tradeDate', 'issueDate', 'maturityDate',
   'koObservation', 'kiObservation', 'ko', 'upperKO', 'lowerKO', 'knockIn', 'strike',
   'participation', 'minRedemption', 'couponBarrier', 'bonus', 'koRebate', 'minCoupon',
-  'coupon', 'settlement',
+  'coupon', 'settlement', 'redemptionUpon',
 ]
 
 /** Sanitize the raw variantFields object from the model reply. Returns null if the

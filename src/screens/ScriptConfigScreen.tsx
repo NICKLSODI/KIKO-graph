@@ -69,6 +69,7 @@ export function ScriptConfigScreen({ state, patch }: { state: AppState; patch: P
       title="ตั้งค่า Output"
       subtitle="เลือกน้ำเสียง ประเด็นเน้น และรูปแบบผลลัพธ์ที่ต้องการ"
       product={state.retrieved?.productName ?? state.selectedProduct?.productCode ?? null}
+      back={{ label: 'โปรไฟล์ลูกค้า', onClick: () => patch({ screen: 'persona' }) }}
       onStepClick={(n) => {
         if (n === 1) patch({ screen: 'backtest' })
         if (n === 2) patch({ screen: 'persona' })
@@ -116,7 +117,6 @@ export function ScriptConfigScreen({ state, patch }: { state: AppState; patch: P
         </Card>
 
         <FlowNav
-          back={{ label: 'โปรไฟล์ลูกค้า', onClick: () => patch({ screen: 'persona' }) }}
           next={{
             label: 'ไปยังผลลัพธ์',
             onClick: () => patch({ screen: 'scriptResults' }),

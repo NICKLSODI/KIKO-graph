@@ -31,7 +31,7 @@ git push origin optimize-1      # ต้องมี GitHub remote แล้ว 
 |--------|----------|----------|
 | **Node.js 18+** (มี npm) | `node -v` `npm -v` | สำหรับ frontend (Vite/React) |
 | **Python 3.10+** | `python --version` | backend ใช้ `X \| None` syntax → ต้อง 3.10 ขึ้นไป |
-| **Claude Code CLI + login** | `claude --version` ต้องขึ้น `(Claude Code)` แล้ว `claude login` | **จำเป็น** — AI ทั้งหมดวิ่งผ่าน `claude -p` โดยใช้ subscription ของเครื่องนี้ ไม่ใช้ API key |
+| **Claude Code CLI + login** | `claude --version` ต้องขึ้น `(Claude Code)` แล้ว `claude auth login` (เช็คสถานะ: `claude auth status`) | **จำเป็น** — AI ทั้งหมดวิ่งผ่าน `claude -p` โดยใช้ subscription ของเครื่องนี้ ไม่ใช้ API key |
 | (ทางเลือก) **`nlm` CLI** | `nlm --version` | เฉพาะถ้าจะใช้ extraction ผ่าน NotebookLM (มี path สำรอง) — ข้ามได้ |
 | (เฉพาะ Windows) Classic Outlook + PowerShell | — | จำเป็นเฉพาะฟีเจอร์ "ส่งอีเมลอัตโนมัติ" เท่านั้น ที่เหลือไม่ต้อง |
 
@@ -82,7 +82,8 @@ npm run dev
 ## 4. ตรวจว่ารันถูก (verify)
 
 1. เปิด `http://localhost:8000/api/generate/health` → ควรได้ `{"available": true, ...}`
-   - ถ้า `false` = หา `claude` ไม่เจอ → ยังไม่ได้ติดตั้ง Claude Code หรือไม่ได้ `claude login`.
+   - ถ้า `false` = หา `claude` ไม่เจอ → ยังไม่ได้ติดตั้ง Claude Code หรือไม่ได้ `claude auth login`.
+   - `"auth"` ในผลลัพธ์คือสิ่งที่หน้าเว็บใช้กั้นปุ่มวิเคราะห์: `ok` / `expired` (ล็อกอินหมดอายุ) / `no-cli` / `unknown`. ถ้า `expired` หน้าเว็บมีปุ่ม "เข้าสู่ระบบ Claude" ที่เรียก `POST /api/generate/login` เปิดหน้าต่าง `claude auth login` ให้ผู้ใช้เอง
 2. บนหน้าเว็บ ถ้าขึ้นแบนเนอร์แดง "เชื่อมต่อ backend ไม่ได้ (localhost:8000)" = backend ยังไม่รัน / พอร์ตไม่ตรง.
 3. Quality gate ก่อนแก้โค้ดต่อ: `npx tsc --noEmit` ต้อง **0 errors**; build จริง: `npm run build`.
 
@@ -130,7 +131,7 @@ Backend URL ถูก **hardcode = `http://localhost:8000`** และ CORS ฝ�
 ## 8. TL;DR (ถ้าอ่านบรรทัดเดียว)
 
 1. เครื่องเดิม: `git add -A && git commit && git push origin optimize-1`
-2. เครื่องใหม่: ติดตั้ง Node + Python 3.10+ + Claude Code (`claude login`)
+2. เครื่องใหม่: ติดตั้ง Node + Python 3.10+ + Claude Code (`claude auth login`)
 3. `git clone … && git checkout optimize-1`
 4. backend: venv → `pip install -r backend/requirements.txt` → `cp .env.example .env` → `uvicorn main:app --reload --port 8000`
 5. frontend: `npm install` → `npm run dev` → เปิด http://localhost:5173

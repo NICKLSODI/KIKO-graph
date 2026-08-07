@@ -80,13 +80,12 @@ function buildSeries(product: NoteProduct, symbol: string, candles: Candle[], ch
   const closes = windowCandles.map((c) => c.close)
   const minClose = closes.length ? Math.min(...closes) : null
   const currentPrice = candles.length ? candles[candles.length - 1].close : null
-  // KI assessment respects kiType: 'final-valuation' (European) is checked only at the final
-  // valuation — approximated by the latest close — so a mid-window dip that recovered does NOT
-  // count; the default 'daily' is a continuous barrier over the whole window (minClose).
-  const knockedIn =
-    kiLevel == null ? false
-    : product.kiType === 'final-valuation' ? (currentPrice != null && currentPrice <= kiLevel)
-    : (minClose != null && minClose <= kiLevel)
+  // Backtest KI = HISTORICAL stress test: "did the underlying ever close at/below the barrier
+  // within the window", scanned every trading day (minClose). This is deliberately daily-always
+  // and ignores the note's own KI observation type — even ✱At Final Valuation — because the
+  // backtest/graph answers the broader "was it ever knocked historically?" question. The
+  // note-accurate (European/final-valuation) semantics belong in the factsheet, not here.
+  const knockedIn = kiLevel != null && minClose != null && minClose <= kiLevel
 
   return {
     symbol,
@@ -120,27 +119,8 @@ export function deriveObservationDates(fixingDate: string | null, tenorMonths: n
   return dates
 }
 
-// Worst-of KO: knocked out if on some PAST observation date (within the backtest window)
-// EVERY underlying closed >= its KO level.
-function checkKnockOut(product: NoteProduct, series: UnderlyingSeries[], lastTime: number, checkFromTime: number): boolean {
-  if (product.koPct == null) return false
-  const explicit = product.koObservationDates.length ? product.koObservationDates : product.observationDates
-  const obs = explicit.length ? explicit : deriveObservationDates(product.fixingDate, product.tenorMonths, product.koObservationFrequency)
-  const targets = obs.map(dateToUnix).filter((t): t is number => t != null && t <= lastTime && t >= checkFromTime)
-
-  const allAboveKoOn = (t: number) =>
-    series.every((s) => {
-      if (s.koLevel == null) return false
-      const px = closeNear(s.candles, t)
-      return px != null && px >= s.koLevel
-    })
-
-  if (targets.length > 0) return targets.some(allAboveKoOn)
-  return false
-}
-
-// "Daily Observe" KO isn't a handful of discrete dates — it's a continuous barrier, same shape
-// as the KI check. Scan every real trading day in the window instead of a synthesized date list.
+// Worst-of KO barrier scanned every real trading day in the window: knocked out if on ANY day
+// EVERY underlying closed at/above its KO level.
 function checkKnockOutContinuous(series: UnderlyingSeries[], checkFromTime: number, lastTime: number): boolean {
   if (series.some((s) => s.koLevel == null)) return false
   const days = (series[0]?.candles ?? []).map((c) => c.time).filter((t) => t >= checkFromTime && t <= lastTime)
@@ -150,23 +130,14 @@ function checkKnockOutContinuous(series: UnderlyingSeries[], checkFromTime: numb
   }))
 }
 
-// KO assessed ONLY at the final valuation (koType 'final-valuation'): a note that only
-// autocalls/redeems at maturity, never on an intermediate date. Approximate the final
-// valuation with the latest close (same treatment as final-valuation KI), so a mid-window
-// observation where all legs sat above KO does NOT wrongly mark it knocked out.
-function checkKnockOutFinal(series: UnderlyingSeries[]): boolean {
-  return series.length > 0 && series.every((s) => s.koLevel != null && s.currentPrice != null && s.currentPrice >= s.koLevel)
-}
-
-// Pick the KO test for this note: final-valuation only (koType) takes precedence, else the
-// continuous daily barrier (koObservationFrequency='daily'), else discrete observation dates
-// (memory / default — any past observation date on which all legs were above KO).
+// Backtest KO = HISTORICAL stress test, mirroring the KI treatment: scan EVERY trading day and
+// mark knocked-out if on any day ALL underlyings (worst-of) closed at/above their KO level —
+// regardless of the note's real observation schedule (monthly / memory / discrete dates) or
+// koType (even ✱final-valuation). The note-accurate autocall semantics belong in the factsheet,
+// not the backtest, which deliberately answers the broader "was it ever knocked historically?".
 function computeKnockedOut(product: NoteProduct, series: UnderlyingSeries[], checkFromTime: number, lastTime: number): boolean {
   if (product.koPct == null) return false
-  if (product.koType === 'final-valuation') return checkKnockOutFinal(series)
-  return product.koObservationFrequency === 'daily'
-    ? checkKnockOutContinuous(series, checkFromTime, lastTime)
-    : checkKnockOut(product, series, lastTime, checkFromTime)
+  return checkKnockOutContinuous(series, checkFromTime, lastTime)
 }
 
 // ── Fast scoring pass ─────────────────────────────────────────────────────────
@@ -180,7 +151,7 @@ export async function backtestScore(product: NoteProduct, windowMonths = 12): Pr
     warnings.push(`ราคาเริ่มต้นในเอกสาร (${product.initialPrices.length} ค่า) ไม่ตรงกับจำนวนหุ้นอ้างอิง (${product.underlyings.length} ตัว) — ระบบไม่ใช้ค่าดังกล่าว และใช้ราคาปิด ณ วัน fixing แทน`)
   }
   if (!product.fixingDate && product.initialPrices.length === 0) {
-    warnings.push('เอกสารไม่ระบุวัน fixing และราคาเริ่มต้น — ระดับ Strike/KI/KO คำนวณจากแท่งแรกของข้อมูลที่ดึงได้ อาจคลาดเคลื่อน')
+    warnings.push('เอกสารไม่ระบุวัน fixing และราคาเริ่มต้น — ระบบใช้ราคาปิดล่าสุดเป็นราคาอ้างอิง ระดับ Strike/KI/KO จึงคิดจากราคาวันนี้ อาจคลาดเคลื่อนจากของจริง')
   }
   const base = { windowMonths, series: [] as UnderlyingSeries[], warnings, chartReady: false }
   if (product.underlyings.length === 0) {
@@ -239,7 +210,11 @@ export async function backtestScore(product: NoteProduct, windowMonths = 12): Pr
   return {
     ...base,
     series, // empty candles[], levels/flags populated
-    verdict: knockedIn || knockedOut ? 'knocked' : 'pass',
+    // Pass/Knocked split is KI-only: a knock-in (underlying breached its downside barrier) is
+    // the "bad" event that disqualifies a note. A knock-out (autocall) is a separate, often
+    // favourable event, so it no longer forces the note into the Knocked table — it's surfaced
+    // as its own KO badge instead. knockedOut stays computed below for that badge.
+    verdict: knockedIn ? 'knocked' : 'pass',
     knockedIn,
     knockedOut,
     bufferPct,
@@ -258,7 +233,7 @@ export async function backtestDetail(product: NoteProduct, windowMonths = 12): P
     warnings.push(`ราคาเริ่มต้นในเอกสาร (${product.initialPrices.length} ค่า) ไม่ตรงกับจำนวนหุ้นอ้างอิง (${product.underlyings.length} ตัว) — ระบบไม่ใช้ค่าดังกล่าว และใช้ราคาปิด ณ วัน fixing แทน`)
   }
   if (!product.fixingDate && product.initialPrices.length === 0) {
-    warnings.push('เอกสารไม่ระบุวัน fixing และราคาเริ่มต้น — ระดับ Strike/KI/KO คำนวณจากแท่งแรกของข้อมูลที่ดึงได้ อาจคลาดเคลื่อน')
+    warnings.push('เอกสารไม่ระบุวัน fixing และราคาเริ่มต้น — ระบบใช้ราคาปิดล่าสุดเป็นราคาอ้างอิง ระดับ Strike/KI/KO จึงคิดจากราคาวันนี้ อาจคลาดเคลื่อนจากของจริง')
   }
   const base = { windowMonths, series: [] as UnderlyingSeries[], warnings, chartReady: true }
   if (product.underlyings.length === 0) {
@@ -302,7 +277,8 @@ export async function backtestDetail(product: NoteProduct, windowMonths = 12): P
   return {
     ...base,
     series,
-    verdict: knockedIn || knockedOut ? 'knocked' : 'pass',
+    // KI-only split — see backtestScore for rationale. KO is surfaced as its own badge.
+    verdict: knockedIn ? 'knocked' : 'pass',
     knockedIn,
     knockedOut,
     bufferPct,

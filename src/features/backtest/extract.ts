@@ -1,10 +1,10 @@
-import { generate, type GenerateFile } from '../../api/generate'
+import { generate, isAuthError, type GenerateFile } from '../../api/generate'
 import type { NoteProduct, StructureType } from './types'
 import { STRUCTURE_TYPES, STRUCTURE_TYPE_LABELS } from './types'
 import type { MarketHint } from '../ingest/ingest'
 import { parseVariantFields, type VariantFields } from '../factsheet/fields'
 // classify.js (not factsheet_generator.js) — the lean classifier module, with no
-// LOGO/CSS/REGISTRY, so this eager-loaded file doesn't drag the ~145kB render engine
+// CSS/REGISTRY, so this eager-loaded file doesn't drag the ~145kB render engine
 // into the main bundle. See classify.js for details.
 import { detectVariant } from '../factsheet/classify.js'
 
@@ -12,11 +12,13 @@ export const NOTE_EXTRACTION_INSTRUCTIONS = `คุณเป็นผู้เ�
 ให้สกัดข้อมูลของ "ผลิตภัณฑ์เดียว" จากเอกสาร แล้วตอบกลับเป็น JSON เท่านั้น (ไม่มีข้อความอื่นนอก JSON) ตาม schema นี้:
 
 {
-  "productCode": string | null,        // รหัสผลิตภัณฑ์ เช่น SG2606256MKIKOU
+  "productCode": string | null,        // รหัสผลิตภัณฑ์จริง เช่น SG2606256MKIKOU — ห้ามใช้ "Selling Code"/"รหัสขาย" (ตัวเลขล้วนเช่น 0624304) เป็นค่านี้เด็ดขาด ถ้าไม่มีรหัสผลิตภัณฑ์จริงให้ null
+  "productName": string | null,        // ชื่อผลิตภัณฑ์/ชื่อหุ้นอ้างอิง "ตามที่พิมพ์ไว้ในเอกสารจริง" เช่น "BANGKOK DUSIT MED SERVICE (BDMS)" หรือ "BANGKOK BANK PUBLIC CO LTD (BBL) & CP ALL PCL (CPALL)" — คัดลอกข้อความจากคอลัมน์ชื่อผลิตภัณฑ์/Stock/Underlying ของแถวนั้นมาตรงๆ ห้ามย่อ ห้ามแต่งใหม่ ห้ามใส่ชื่อโครงสร้าง (KIKO/Sharkfin) ถ้าเอกสารไม่ได้เขียนไว้ ถ้าเอกสารไม่มีชื่อให้ null
   "issuer": string | null,             // ผู้ออก เช่น SG, BNPP
   "underlyings": string[],             // หุ้นอ้างอิงทุกตัว (ticker) เช่น ["AMD","MRVL"] — ถ้า basket ต้องครบทุกตัว
   "initialPrices": number[],           // ราคาเริ่มต้น/ราคาอ้างอิง (Initial/Underlying Price) ของหุ้นแต่ละตัว "เรียงลำดับให้ตรงกับ underlyings ทีละตัว" — เอาตัวเลขจริงจากตารางในเอกสาร (เช่น "Underlying price as of ...") ห้ามคำนวณเอง ถ้าตัวใดไม่มีในเอกสารให้เว้นว่างเป็น [] ทั้งชุด
   "market": "thai" | "foreign",        // ตลาดของหุ้นอ้างอิง (foreign=US/ต่างประเทศ)
+  "notional": number | null,           // มูลค่าเงินลงทุน/จองซื้อขั้นต่ำ ถ้าเอกสารหรือรูประบุไว้ เช่น "ลงทุนขั้นต่ำ 5 แสนบาท" → 500000, "THB 1,000,000" → 1000000, "Notional USD 30,000" → 30000 — ใส่ "ตัวเลขล้วน" ไม่มีลูกน้ำ/หน่วย และต้องแปลงคำไทยเป็นตัวเลข (แสน=100000, ล้าน=1000000) ถ้าเอกสารไม่ระบุให้ null (ห้ามเดา)
   "strikePct": number | null,          // ระดับ Strike เป็น % ของราคาเริ่มต้น (ตัวเลขล้วน เช่น 100)
   "kiPct": number | null,              // ระดับ Knock-In เป็น % (null ถ้าโครงสร้างไม่มี KI)
   "koPct": number | null,              // ระดับ Knock-Out เป็น % (null ถ้าไม่มี KO) — รวมถึง "KO barrier"/"Knock-Out Barrier" ด้วย ต้องกรอกแม้เอกสารจะมี Participation Rate อยู่ด้วยก็ตาม (สองอย่างนี้อยู่ร่วมกันได้ เช่นใน Sharkfin)
@@ -52,14 +54,16 @@ export const NOTE_EXTRACTION_INSTRUCTIONS = `คุณเป็นผู้เ�
     "koRebate": string | null,         // KO Rebate เช่น "7% flat"
     "minCoupon": string | null,        // Minimum Coupon เช่น "3.5% flat"
     "coupon": string | null,           // อัตราดอกเบี้ย/คูปอง เช่น "16.00% p.a."
-    "settlement": "cash" | "physical" | null
+    "settlement": "cash" | "physical" | null,
+    "redemptionUpon": string | null    // เงื่อนไขการไถ่ถอน เช่น "Maturity", "Autocall" — จากบรรทัด "Redemption upon" ถ้ามี
   }
 }
 
 กฎ:
 - ฟิลด์ระดับบนสุด (strikePct, kiPct, koPct, couponPa ฯลฯ): ใส่ตัวเลขล้วน ไม่มีเครื่องหมาย % (เช่น 46.2 ไม่ใช่ "46.2%")
 - ฟิลด์ใน variantFields: ตรงกันข้าม — ใส่เป็นข้อความพร้อมหน่วยตามเอกสารจริง (เช่น "115%", "16.00% p.a.")
-- ถ้าข้อมูลใดไม่พบ ให้ใส่ null หรือ [] ตามชนิด ห้ามเดาตัวเลขที่ไม่มีในเอกสาร`
+- ถ้าข้อมูลใดไม่พบ ให้ใส่ null หรือ [] ตามชนิด ห้ามเดาตัวเลขที่ไม่มีในเอกสาร
+- ห้ามใช้ "Selling Code"/"รหัสขาย" (เช่น 0624304) เป็น productCode หรือชื่อผลิตภัณฑ์ และห้ามใส่รหัสนี้ไว้ในผลลัพธ์ที่ใดเลย — มันเป็นรหัสขายภายใน ไม่ใช่ชื่อ/รหัสผลิตภัณฑ์`
 
 // Batch mode: one pasted text may contain MANY products (a trading desk's daily listing).
 // Let the model decide how many products there are and how many underlyings each has —
@@ -71,6 +75,7 @@ export const NOTE_BATCH_INSTRUCTIONS = `${NOTE_EXTRACTION_INSTRUCTIONS}
 - หุ้นอ้างอิงหลายตัวในผลิตภัณฑ์เดียว (worst-of basket) มักเขียนติดกัน เช่น "(TSM ASML AMD)" หรือ "(MU ORCL)" ให้แยกเป็น ticker ทีละตัวใน underlyings
 - ถ้ามีบริบทวันที่ของรายการ (เช่น "รายการวันนี้ DD/MM/YYYY") ให้ใช้เป็นวัน fixing โดยประมาณของผลิตภัณฑ์ที่อยู่ถัดจากนั้น และถ้าระบุ "Issue T+7" ให้บวก 7 วัน
 - ข้ามบรรทัดที่ไม่ใช่ข้อมูลผลิตภัณฑ์ (เช่น disclaimer, "internal use only")
+- กรณีเอกสารเป็น "ตาราง Term Sheet" ที่มีหุ้นอ้างอิงหลายชุด (หลายแถวในตาราง Underlying หรือหลาย Selling Code): ให้ถือว่าแต่ละแถว/แต่ละชุดเป็น "ผลิตภัณฑ์แยกกันหนึ่งรายการ" — หุ้นที่วางซ้อนกันในแถวเดียวกัน (เช่น BDMS กับ MTC) คือ worst-of basket ของผลิตภัณฑ์เดียวกันนั้น ให้แยกออกเป็นหลาย object ใน array (แถวละ 1 object) แม้เงื่อนไขอื่น (Coupon, Tenor, วันสังเกตการณ์) จะใช้ร่วมกันทั้งเอกสารก็ตาม
 - ตอบกลับเป็น JSON array เท่านั้น: [ {ตาม schema ด้านบน}, {…}, … ] — ถ้ามีผลิตภัณฑ์เดียว ให้ตอบเป็น array ที่มีสมาชิก 1 ตัว`
 
 function num(v: unknown): number | null {
@@ -87,6 +92,14 @@ function num(v: unknown): number | null {
 }
 function str(v: unknown): string | null {
   return typeof v === 'string' && v.trim() ? v.trim() : null
+}
+// "100%" / "75.5 %" → 75.5. Deliberately refuses anything that isn't a single clean
+// percentage — a range like "70–75.5%" has no one level, so the caller keeps its null and
+// the UI shows "—" instead of silently picking an end of the range.
+function pctFromText(v: string | null): number | null {
+  if (!v) return null
+  const m = v.trim().match(/^(\d+(?:\.\d+)?)\s*%/)
+  return m ? Number(m[1]) : null
 }
 function strArr(v: unknown): string[] {
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map((x) => x.trim()) : []
@@ -147,18 +160,24 @@ function tenorToMonths(tenor: string | null): number | null {
 function fromObject(p: Record<string, unknown>, raw: string, sourceFile: string, id: string): NoteProduct {
   const market: MarketHint = p.market === 'thai' ? 'thai' : 'foreign'
   const tenor = str(p.tenor)
-  const strikePct = num(p.strikePct)
-  const kiPct = num(p.kiPct)
-  const koPct = num(p.koPct)
-  const couponPa = num(p.couponPa)
   const variantFields = parseVariantFields(p.variantFields)
+  // The model sometimes fills only the factsheet-side string ("100%") and leaves the numeric
+  // top-level field null. Both come from the SAME document line, so read the string as the
+  // fallback — otherwise Strike/KO/KI prices and the KO backtest silently drop out even
+  // though the term sheet stated the level.
+  const strikePct = num(p.strikePct) ?? pctFromText(variantFields?.strike ?? null)
+  const kiPct = num(p.kiPct) ?? pctFromText(variantFields?.knockIn ?? null)
+  const koPct = num(p.koPct) ?? pctFromText(variantFields?.ko ?? null)
+  const couponPa = num(p.couponPa) ?? pctFromText(variantFields?.coupon ?? null)
   return {
     id,
     productCode: str(p.productCode),
+    productName: str(p.productName),
     issuer: str(p.issuer),
     underlyings: strArr(p.underlyings).map((s) => s.toUpperCase()),
     initialPrices: numArr(p.initialPrices),
     market,
+    notional: num(p.notional),
     structureType: structureOf(variantFields, { koPct, kiPct, strikePct, couponPa }),
     strikePct,
     kiPct,
@@ -197,23 +216,30 @@ export function parseNoteProduct(raw: string, sourceFile: string, id: string): N
 // text holds and how many underlyings each has — no fixed format assumed.
 export function parseNoteProducts(raw: string, sourceFile: string, mkId: () => string): NoteProduct[] {
   const cleaned = raw.replace(/```(?:json)?/gi, '').trim()
-  const match = cleaned.match(/\[[\s\S]*\]/)
-  if (!match) throw new Error(`สกัดข้อมูลไม่สำเร็จ (${sourceFile}) — AI ตอบ: ${raw.trim().slice(0, 200)}`)
-  let arr: unknown
+  const arrMatch = cleaned.match(/\[[\s\S]*\]/)
+  // A chunk holding ONE product often comes back as a bare object instead of a 1-element
+  // array, whatever the instructions say. Rejecting that used to lose the whole chunk.
+  const objMatch = arrMatch ? null : cleaned.match(/\{[\s\S]*\}/)
+  if (!arrMatch && !objMatch) throw new Error(`สกัดข้อมูลไม่สำเร็จ (${sourceFile}) — AI ตอบ: ${raw.trim().slice(0, 200)}`)
+  let parsed: unknown
   try {
-    arr = JSON.parse(match[0])
+    parsed = JSON.parse((arrMatch ?? objMatch!)[0])
   } catch {
     throw new Error(`แปลง JSON ไม่สำเร็จ (${sourceFile})`)
   }
-  if (!Array.isArray(arr)) throw new Error(`AI ไม่ได้ตอบเป็น array (${sourceFile})`)
+  const arr = Array.isArray(parsed) ? parsed : [parsed]
   return arr
     .filter((p): p is Record<string, unknown> => p != null && typeof p === 'object')
     .map((p) => {
       const prod = fromObject(p, JSON.stringify(p), sourceFile, mkId())
       // Batch products rarely carry a real product code, so the shared source label
       // ("ข้อความ #1") would be the display name for all of them. Derive a distinct,
-      // readable name from the structure + underlyings instead.
-      if (!prod.productCode) prod.sourceFile = `${STRUCTURE_TYPE_LABELS[prod.structureType]} (${prod.underlyings.join('/')})`
+      // readable name from the structure + underlyings instead — but ONLY when the document
+      // named nothing itself: a listing that prints "BANGKOK DUSIT MED SERVICE (BDMS)" keeps
+      // that exact name rather than being re-labelled "KIKO (BDMS)".
+      if (!prod.productCode && !prod.productName) {
+        prod.sourceFile = `${STRUCTURE_TYPE_LABELS[prod.structureType]} (${prod.underlyings.join('/')})`
+      }
       return prod
     })
     .filter((p) => p.underlyings.length > 0) // drop empty/garbage entries
@@ -263,28 +289,50 @@ function chunkBlocks(blocks: ProductBlock[]): string[] {
   return chunks
 }
 
+/** Reports a non-fatal problem (one failed chunk out of several) to the caller so it can
+ *  show it, instead of the products just silently going missing. */
+export type WarnFn = (message: string) => void
+
 /** Extract ALL products from a large pasted listing by chunking + concurrent extraction.
  *  Falls back to a single call when the text isn't a multi-product listing. */
-export async function extractNotesFromTextChunked(text: string, label: string, mkId: () => string): Promise<NoteProduct[]> {
+export async function extractNotesFromTextChunked(text: string, label: string, mkId: () => string, onWarn?: WarnFn): Promise<NoteProduct[]> {
   const blocks = splitProductBlocks(text)
   // Not a splittable multi-product listing (0–1 detectable blocks) → one shot as before.
   if (blocks.length <= 1) return extractNotesFromText(text, label, mkId)
 
   const chunks = chunkBlocks(blocks)
   const out: NoteProduct[][] = new Array(chunks.length).fill(null).map(() => [])
+  const failures: string[] = []
   let started = 0
+  // A dead Claude login fails EVERY chunk identically. Stop the whole batch at the first
+  // one instead of grinding through the rest and reporting the same error N times.
+  let authError: Error | null = null
   async function worker() {
-    while (started < chunks.length) {
+    while (started < chunks.length && !authError) {
       const idx = started++
       try {
         out[idx] = await extractNotesFromText(chunks[idx], `${label} #${idx + 1}`, mkId)
-      } catch {
-        out[idx] = [] // isolate a failed chunk — the rest still return
+      } catch (err) {
+        // Isolate a failed chunk — the rest still return — but never swallow the reason:
+        // a fully-failed paste used to land on an empty dashboard with no error at all.
+        out[idx] = []
+        if (isAuthError(err)) {
+          authError = err instanceof Error ? err : new Error(String(err))
+          return
+        }
+        failures.push(`${label} #${idx + 1}: ${err instanceof Error ? err.message : String(err)}`)
       }
     }
   }
   await Promise.all(Array.from({ length: Math.min(CHUNK_CONCURRENCY, chunks.length) }, worker))
-  return out.flat()
+  if (authError) throw authError
+  const prods = out.flat()
+  if (failures.length) {
+    // Nothing survived → throw, so the caller's own error handling surfaces it.
+    if (!prods.length) throw new Error(`สกัดข้อมูลไม่สำเร็จทุกส่วน (${chunks.length} ส่วน) — ${failures.join(' | ')}`)
+    onWarn?.(`สกัดไม่สำเร็จ ${failures.length}/${chunks.length} ส่วน — ${failures.join(' | ')}`)
+  }
+  return prods
 }
 
 export type NoteSource =
@@ -352,6 +400,32 @@ export async function extractNote(source: NoteSource, id: string): Promise<NoteP
   const product = parseNoteProduct(text, source.label, id) // validate BEFORE caching — never cache junk
   cacheSet(key, text)
   return product
+}
+
+/** Extract ALL products from ANY source (file, web link, or pasted text). A single
+ *  term-sheet file/link can hold MANY baskets (each row of the underlying table = one
+ *  worst-of product), so this always returns an array. Text routes to the chunked path;
+ *  file/link use the batch instructions + array parse. Cached by content hash. */
+export async function extractNotesFromSource(source: NoteSource, mkId: () => string, onWarn?: WarnFn): Promise<NoteProduct[]> {
+  if (source.kind === 'text') return extractNotesFromTextChunked(source.text, source.label, mkId, onWarn)
+
+  const key = await contentHash(source, NOTE_BATCH_INSTRUCTIONS)
+  const cached = cacheGet(key)
+  if (cached) {
+    try {
+      const prods = parseNoteProducts(cached, source.label, mkId)
+      if (prods.length) return prods
+    } catch { /* stale/corrupt entry — fall through to a fresh extraction */ }
+  }
+
+  const prompt =
+    source.kind === 'file'
+      ? `${NOTE_BATCH_INSTRUCTIONS}\n\nเอกสาร Term Sheet แนบเป็นไฟล์ (${source.file.name})`
+      : `${NOTE_BATCH_INSTRUCTIONS}\n\nเอกสาร Term Sheet (Web Link): ${source.link}\nกรุณาเปิดลิงก์นี้เพื่ออ่านเนื้อหาก่อนตอบ`
+  const reply = source.kind === 'file' ? await generate(prompt, source.file) : await generate(prompt)
+  const prods = parseNoteProducts(reply, source.label, mkId) // validate BEFORE caching — never cache junk
+  cacheSet(key, reply)
+  return prods
 }
 
 /** Extract ALL products from one pasted text (batch listing). The model decides how many
