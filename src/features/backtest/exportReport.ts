@@ -4,7 +4,7 @@ import { backtestDetail } from './engine'
 import { scoreProducts, PROFILE_WEIGHTS } from './scoring'
 import { DISCLAIMER, factsFor, safeName, warningsFor, windowLabel, type WindowItems } from './reportContent'
 import type { BacktestResult, DetailProduct, ScoredProduct, UnderlyingSeries } from './types'
-import { STRUCTURE_TYPE_LABELS } from './types'
+import { STRUCTURE_TYPE_LABELS, productLabel, notionalFor, verdictLabel, seriesVerdict, seriesVerdictLabel } from './types'
 import { LEVEL_COLORS, LEVEL_LABELS } from '../../types'
 import type { DateMark, Level } from '../../types'
 import { buildData, defaultVisibleRange, nearestAxisTime } from '../../components/CandleChart'
@@ -65,9 +65,9 @@ function rowsOf(list: DetailProduct[]): (string | number)[][] {
   const line = (s: DetailProduct): (string | number)[] => {
     const ps = scores.get(s.product.id)
     return [
-      s.rank == null ? 'Unranked (non-KIKO)' : s.backtest.verdict === 'pass' ? 'Historical Pass' : 'Historical Knocked',
+      s.rank == null ? 'Unranked (non-KIKO)' : verdictLabel(s.backtest.verdict, REPORT_WINDOW),
       s.rank ?? '',
-      s.product.productCode ?? s.product.sourceFile,
+      productLabel(s.product),
       s.product.underlyings.join(' '),
       STRUCTURE_TYPE_LABELS[s.product.structureType],
       s.product.couponPa ?? '',
@@ -245,7 +245,6 @@ async function productCardHtml(s: DetailProduct, accent: string): Promise<string
               <div class="series">
                 <div class="series-head">
                   <b>${ser.symbol}</b>
-                  <span class="muted">initial ${ser.initialPrice?.toFixed(2) ?? '-'}</span>
                 </div>
                 <img src="${img}" width="100%" />
               </div>`
@@ -265,7 +264,7 @@ async function productCardHtml(s: DetailProduct, accent: string): Promise<string
     <section class="card">
       <div class="card-head" style="border-left-color:${accent}">
         <div class="card-title">
-          <b>${p.productCode ?? p.sourceFile}</b>
+          <b>${productLabel(p)}</b>
           ${invxBadge}
         </div>
         <div class="summary">${p.summary || ''}</div>
@@ -282,7 +281,7 @@ async function productCardHtml(s: DetailProduct, accent: string): Promise<string
 export async function printProductReport(s: DetailProduct, windowMonths: number): Promise<void> {
   const accent = s.backtest.verdict === 'pass' ? '#0F6E56' : '#993C1D'
   const card = await productCardHtml(s, accent)
-  const title = s.product.productCode ?? s.product.sourceFile
+  const title = productLabel(s.product)
 
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>${title} — KIKO Report</title>
   <style>
@@ -389,7 +388,31 @@ function fittedFactValueFont(ctx: CanvasRenderingContext2D, text: string, maxWid
   }
   return `bold 13px ${FONT_STACK}`
 }
-const F_SERIES_SUB = `19px ${FONT_STACK}`
+const F_PILL = `bold 17px ${FONT_STACK}`
+// Per-stock verdict pill, same palette as the app's pass/knock badges.
+const PILL_PASS = { fill: '#E3F6EE', border: '#9FE1CB', text: '#0A8F63' }
+const PILL_KNOCK = { fill: '#FDEAEA', border: '#F2B0B0', text: '#D62F2F' }
+
+/** Draw a rounded verdict pill ending at `xRight`; returns nothing (layout is fixed-height). */
+function drawPill(ctx: CanvasRenderingContext2D, text: string, xRight: number, yBaseline: number, knocked: boolean): void {
+  const c = knocked ? PILL_KNOCK : PILL_PASS
+  ctx.font = F_PILL
+  const w = ctx.measureText(text).width + 24
+  const h = 28
+  const x = xRight - w
+  const y = yBaseline - 21
+  ctx.beginPath()
+  ctx.roundRect(x, y, w, h, 14)
+  ctx.fillStyle = c.fill
+  ctx.fill()
+  ctx.strokeStyle = c.border
+  ctx.lineWidth = 1
+  ctx.stroke()
+  ctx.fillStyle = c.text
+  ctx.textAlign = 'center'
+  ctx.fillText(text, x + w / 2, y + 20)
+  ctx.textAlign = 'left'
+}
 const F_FOOTER = `16px ${FONT_STACK}`
 const F_WARN = `18px ${FONT_STACK}`
 const WARN_PAD = 14
@@ -410,7 +433,7 @@ export interface WindowResult {
 async function buildProductJpgCanvas(s: DetailProduct, windows: WindowResult[]): Promise<{ canvas: HTMLCanvasElement; title: string }> {
   const p = s.product
   const koTimes = koTimesFor(p)
-  const title = p.productCode ?? p.sourceFile
+  const title = productLabel(p)
   // INVX's own recommendation stamp — client-facing, unlike the internal score/rank this
   // export deliberately omits. Only the ON-CANVAS heading gets the prefix (reuses the
   // existing wrap/measure logic); `title` itself stays clean since it's also the filename.
@@ -434,8 +457,7 @@ async function buildProductJpgCanvas(s: DetailProduct, windows: WindowResult[]):
               return { ser, canvas }
             }),
           )
-      const verdictText = `${bt.verdict === 'pass' ? 'Historical Pass — ไม่เคยชน KI' : 'Historical Knocked — เคยชน KI'}${bt.knockedOut ? ' · KO (autocall)' : ''}`
-      return { windowMonths: w.windowMonths, error: bt.error, verdictText, charts }
+      return { windowMonths: w.windowMonths, error: bt.error, charts }
     }),
   )
 
@@ -572,11 +594,7 @@ async function buildProductJpgCanvas(s: DetailProduct, windows: WindowResult[]):
     ctx.font = F_SERIES_HEAD
     ctx.fillStyle = accent
     ctx.fillText(`ย้อนหลัง ${windowLabel(sec.windowMonths)}`, JPG_MARGIN + 12, y - 10)
-    ctx.font = F_SERIES_SUB
-    ctx.fillStyle = MUTED_COLOR
-    ctx.textAlign = 'right'
-    ctx.fillText(sec.verdictText, JPG_MARGIN + JPG_CONTENT_W - 12, y - 11)
-    ctx.textAlign = 'left'
+    // No basket-level verdict line here — each chart states its own answer on its pill.
 
     if (sec.error) {
       ctx.font = F_SUMMARY
@@ -589,11 +607,12 @@ async function buildProductJpgCanvas(s: DetailProduct, windows: WindowResult[]):
       ctx.fillStyle = TEXT_COLOR
       y += SERIES_HEAD_LH
       ctx.fillText(ser.symbol, JPG_MARGIN, y - 8)
-      const symbolW = ctx.measureText(ser.symbol).width
-      ctx.font = F_SERIES_SUB
-      ctx.fillStyle = MUTED_COLOR
-      const subText = `initial ${ser.initialPrice?.toFixed(2) ?? '-'}`
-      ctx.fillText(subText, JPG_MARGIN + symbolW + 14, y - 8)
+      // Each chart answers for ITS OWN stock — a single basket-level line above three charts
+      // read as if every stock had breached (or held) the barrier.
+      drawPill(ctx, seriesVerdictLabel(seriesVerdict(ser), sec.windowMonths), JPG_MARGIN + JPG_CONTENT_W, y - 8, ser.knockedIn)
+      // No "initial <price>" caption on client-facing images — the chart's own Strike/KO/KI
+      // axis labels already carry every price the reader needs, and the raw reference price
+      // read as jargon next to the ticker.
       ctx.drawImage(chartCanvas, JPG_MARGIN, y, JPG_CONTENT_W, chartH)
       y += chartH + 16
     }
@@ -668,8 +687,8 @@ export interface BatchPackage {
 //   summary.csv                  (desk-internal table: rank + all three profile scores)
 //   SN-Desk-ranking-<date>.html  (same interactive report that gets emailed)
 //   png-for-line/01-<product>.png    ← multi-select these straight into a LINE chat
-//   factsheet_th/01-<product>.html
-//   factsheet_en/01-<product>.html
+//   factsheet_th/01-<product>.png   ← factsheet as an image, straight into a chat/LINE
+//   factsheet_en/01-<product>.png
 // Factsheets are included only when the real-data mapper succeeds — the illustrative
 // fallback template must never land in a client-bound zip unnoticed.
 export async function buildBatchPackage(
@@ -677,9 +696,10 @@ export async function buildBatchPackage(
   byWindow: WindowItems[],
   onProgress?: (done: number, total: number) => void,
 ): Promise<BatchPackage> {
-  const [{ default: JSZip }, { renderFactsheet }, { buildCombinedReportHtml }] = await Promise.all([
+  const [{ default: JSZip }, { renderFactsheet }, { factsheetPngBlob }, { buildCombinedReportHtml }] = await Promise.all([
     import('jszip'),
     import('../factsheet/adapter'), // lazy — pulls the 145kB render engine only for exports
+    import('../factsheet/exportImage'),
     import('./interactiveHtml'), // lazy — inlines the 192kB standalone chart bundle as text
   ])
   const zip = new JSZip()
@@ -704,7 +724,9 @@ export async function buildBatchPackage(
     if (png) pngFolder.file(`${index}-${name}.png`, png)
 
     // Factsheet with Spot = latest close per underlying (same data the dashboard button
-    // passes to the factsheet screen). No notional in batch mode — no shares column.
+    // passes to the factsheet screen). Batch mode has no typed notional, so it uses the
+    // desk's standard ticket size for the market — otherwise Min. Subscription, Net Interest
+    // and the shares-for-delivery column drop out of every exported factsheet.
     const spots: Record<string, number> = {}
     let lastTime = 0
     for (const ser of detail.backtest.series) {
@@ -714,8 +736,16 @@ export async function buildBatchPackage(
     }
     const spotAsOf = lastTime ? new Date(lastTime * 1000).toISOString().slice(0, 10) : null
     for (const lang of ['th', 'en'] as const) {
-      const fs = renderFactsheet(detail.product, lang, undefined, null, spots, spotAsOf)
-      if (fs.real) fsFolders[lang].file(`${index}-${name}.html`, fs.html)
+      const fs = renderFactsheet(detail.product, lang, undefined, notionalFor(detail.product), spots, spotAsOf)
+      if (!fs.real) continue
+      // Image only — the desk sends factsheets through chat/LINE, and a .html attachment
+      // that has to be opened in a browser first was never the file anyone picked.
+      // A rasterizing failure just drops that one sheet; the batch keeps going.
+      try {
+        fsFolders[lang].file(`${index}-${name}.png`, await factsheetPngBlob(fs.html))
+      } catch {
+        /* skip this factsheet */
+      }
     }
     done++
     onProgress?.(done, ordered.length)

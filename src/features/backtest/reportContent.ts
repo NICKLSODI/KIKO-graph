@@ -4,7 +4,7 @@
 // the other (which would create a cycle: exportReport pulls interactiveHtml for the zip).
 import { koScheduleAssumed } from './chartData'
 import type { BacktestResult, DetailProduct, NoteProduct } from './types'
-import { STRUCTURE_TYPE_LABELS, koObservationLabel, kiObservationLabel } from './types'
+import { STRUCTURE_TYPE_LABELS, koObservationLabel, kiObservationLabel, monthlyInterest, notionalFor } from './types'
 
 /** One backtest window's already-scored KIKO items — the ranking source for one window.
  *  The caller runs backtestScore per window (prices are cached, so it's CPU only). */
@@ -31,6 +31,7 @@ export function warningsFor(s: DetailProduct): string[] {
 
 export function factsFor(s: DetailProduct): [string, string][] {
   const p = s.product
+  const money = monthlyInterest(p)
   return [
     ['หุ้นอ้างอิง', p.underlyings.join(', ') || '-'],
     ['ประเภทโครงสร้าง', STRUCTURE_TYPE_LABELS[p.structureType]],
@@ -39,14 +40,23 @@ export function factsFor(s: DetailProduct): [string, string][] {
     ['KO observation', koObservationLabel(p)],
     ['KI observation', kiObservationLabel(p)],
     ['Coupon (p.a.)', fmt(p.couponPa)],
+    // The headline sales number, on the same notional the factsheet uses (the document's own
+    // amount when it stated one, else the desk's standard ticket size). THB is net of 15% WHT;
+    // other currencies are gross — a Thai WHT rate is never asserted on a non-THB deal.
+    ...(money
+      ? ([[
+          money.net ? 'ดอกเบี้ยสุทธิ/เดือน' : 'ดอกเบี้ย/เดือน (ก่อนภาษี)',
+          `${money.currency} ${money.amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · Notional ${money.currency} ${notionalFor(p).toLocaleString('en-US')}`,
+        ]] as [string, string][])
+      : []),
     ['Tenor', p.tenor ?? '-'],
     ['Issuer', p.issuer ?? '-'],
   ]
 }
 
-// Human labels for the backtest windows.
-const WINDOW_LABELS: Record<number, string> = { 6: '6 เดือน', 12: '1 ปี', 24: '2 ปี' }
-export const windowLabel = (m: number): string => WINDOW_LABELS[m] ?? `${m} เดือน`
+// Window labels live in types.ts (verdictLabel needs them too); re-exported here so the
+// exporters keep their single content import.
+export { windowLabel } from './types'
 
 /** Filename-safe product title (Thai letters kept — the desk names files in Thai). */
 export const safeName = (t: string) => t.replace(/[^\w.ก-๙-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'product'

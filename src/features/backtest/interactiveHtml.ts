@@ -18,6 +18,7 @@ import { koTimesFor, levelsAndMarksFor } from './chartData'
 import { DISCLAIMER, factsFor, warningsFor, windowLabel, type WindowItems } from './reportContent'
 import { scoreProducts, PROFILE_WEIGHTS, PROFILE_LABELS } from './scoring'
 import type { DetailProduct, ScoredProduct } from './types'
+import { productLabel, monthlyInterest, notionalFor, sharesForDelivery, verdictLabel, seriesVerdict, seriesVerdictLabel } from './types'
 import { LEVEL_COLORS, LEVEL_LABELS } from '../../types'
 import { buildData, defaultVisibleRange, nearestAxisTime, computeEma } from '../../components/CandleChart'
 
@@ -86,8 +87,72 @@ const LEGEND_HTML = `<div class="legend">${(['strike', 'knock-in', 'knock-out'] 
 
 function factsHtml(s: DetailProduct): string {
   return `<div class="facts">${factsFor(s)
+    // The interest/month row gets the hero box of its own below, so it isn't repeated here.
+    .filter(([k]) => !/ดอกเบี้ย.*เดือน/.test(k))
     .map(([k, v]) => `<div class="fact"><span class="fact-k">${esc(k)}</span><span class="fact-v">${esc(v)}</span></div>`)
     .join('')}</div>`
+}
+
+const money2 = (v: number) => v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
+/** The number the client asks about first: interest per month on the notional, with the
+ *  arithmetic spelled out underneath. THB is net of 15% WHT; other currencies are gross. */
+function interestHeroHtml(s: DetailProduct): string {
+  const p = s.product
+  const m = monthlyInterest(p)
+  if (!m) return ''
+  const notional = notionalFor(p)
+  const whtStep = m.net ? ' × (1 − WHT 15%)' : ''
+  const label = m.net ? 'ดอกเบี้ยสุทธิ / เดือน' : 'ดอกเบี้ย / เดือน (ก่อนภาษี)'
+  return `<section class="card hero">
+      <div class="hero-main">
+        <div class="hero-k">${label}</div>
+        <div class="hero-v">${esc(`${m.currency} ${money2(m.amount)}`)}</div>
+      </div>
+      <div class="hero-side">
+        <div><span class="hero-sk">Notional</span><span class="hero-sv">${esc(`${m.currency} ${notional.toLocaleString('en-US')}`)}</span></div>
+        <div><span class="hero-sk">Coupon</span><span class="hero-sv">${p.couponPa == null ? '-' : esc(`${p.couponPa}% p.a.`)}</span></div>
+        <div><span class="hero-sk">Tenor</span><span class="hero-sv">${esc(p.tenor ?? '-')}</span></div>
+      </div>
+      <div class="hero-calc"><b>วิธีคำนวณ:</b> ${esc(`${m.currency} ${notional.toLocaleString('en-US')}`)} × ${p.couponPa}% / 12${whtStep} = <b>${esc(`${m.currency} ${money2(m.amount)}`)}</b> ต่อเดือน${
+        p.notional != null ? ' · Notional ตามที่ระบุในเอกสาร' : ' · Notional มาตรฐานของโต๊ะค้า'
+      }</div>
+    </section>`
+}
+
+const LEVELS_HEAD = [
+  'หุ้นอ้างอิง', 'Reference Spot', 'Strike Level (%)', 'Strike Price',
+  'KO Level (%)', 'KO Price', 'KI Level (%)', 'KI Price', 'Coupon (p.a.)', 'จำนวนหุ้นที่ต้องส่งมอบ',
+]
+
+/** Per-underlying price levels — the same table the detail page shows, so the reader who
+ *  saw it in the app finds identical numbers here (levels = stated % × reference price;
+ *  shares = notional ÷ strike, rounded down to the board lot). */
+function levelsTableHtml(s: DetailProduct): string {
+  const p = s.product
+  if (!s.backtest.series.length) return ''
+  const notional = notionalFor(p)
+  const pct = (v: number | null) => (v == null ? '–' : `${v}%`)
+  const px = (v: number | null | undefined) => (v == null ? '-' : v.toFixed(2))
+  const rows = s.backtest.series
+    .map((ser) => {
+      const shares = sharesForDelivery(notional, ser.strikeLevel, p.market)
+      return `<tr>
+        <td class="strong">${esc(ser.symbol)}</td>
+        <td>${px(ser.initialPrice)}</td>
+        <td>${pct(p.strikePct)}</td>
+        <td>${px(ser.strikeLevel)}</td>
+        <td>${pct(p.koPct)}</td>
+        <td>${px(ser.koLevel)}</td>
+        <td>${pct(p.kiPct)}</td>
+        <td>${px(ser.kiLevel)}</td>
+        <td>${pct(p.couponPa)}</td>
+        <td class="strong">${shares == null ? '-' : shares.toLocaleString('en-US')}</td>
+      </tr>`
+    })
+    .join('')
+  return `<div class="panel-note">ระดับราคาต่อหุ้นอ้างอิง — คำนวณจากราคาอ้างอิง × % ที่ระบุในเอกสาร · จำนวนหุ้นส่งมอบคิดจาก Notional ÷ Strike ปัดลงตามหน่วยซื้อขาย</div>
+    <div class="table-wrap levels"><table><thead><tr>${LEVELS_HEAD.map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`
 }
 
 function warnHtml(s: DetailProduct): string {
@@ -95,10 +160,7 @@ function warnHtml(s: DetailProduct): string {
   return warns.length ? `<div class="warn">${warns.map((w) => `<div>⚠ ${esc(w)}</div>`).join('')}</div>` : ''
 }
 
-const verdictText = (s: DetailProduct): string =>
-  `${s.backtest.verdict === 'pass' ? 'Historical Pass — ไม่เคยชน KI' : 'Historical Knocked — เคยชน KI'}${s.backtest.knockedOut ? ' · KO (autocall)' : ''}`
-
-const titleOf = (s: DetailProduct): string => s.product.productCode ?? s.product.sourceFile
+const titleOf = (s: DetailProduct): string => productLabel(s.product)
 
 // One basket's page: header, facts, warnings, chart toolbar, one chart per underlying.
 // `index` scopes the DOM ids so many product views can coexist in the same document.
@@ -112,9 +174,8 @@ function productViewHtml(s: DetailProduct, payloads: ChartPayload[], index: numb
       <section class="card">
         <div class="series-head">
           ${esc(c.symbol)}
-          <span class="muted">initial ${c.initialPrice == null ? '-' : c.initialPrice.toFixed(2)}</span>
           <span class="muted">ปัจจุบัน ${c.currentPrice == null ? '-' : c.currentPrice.toFixed(2)}</span>
-          ${c.knockedIn ? '<span class="badge knock">เคยชน KI</span>' : ''}
+          <span class="badge ${c.knockedIn ? 'knock' : 'pass'}">${esc(seriesVerdictLabel(seriesVerdict(c), chartWindowMonths))}</span>
         </div>
         <div class="chart-box"><div id="chart-${index}-${si}"></div></div>
         ${LEGEND_HTML}
@@ -135,11 +196,12 @@ function productViewHtml(s: DetailProduct, payloads: ChartPayload[], index: numb
     ${withBack ? '<a class="back" href="#/ranking">← กลับหน้าจัดอันดับ</a>' : ''}
     <h1>${p.invxPick ? '<span class="badge invx">💎 INVX Pick</span> ' : ''}${esc(titleOf(s))}</h1>
     <div class="sub">
-      <span class="badge ${s.backtest.verdict === 'pass' ? 'pass' : 'knock'}">${esc(verdictText(s))}</span>
       <span>กราฟย้อนหลัง ${esc(windowLabel(chartWindowMonths))}</span>
     </div>
     ${p.summary ? `<div class="summary">${esc(p.summary)}</div>` : ''}
+    ${interestHeroHtml(s)}
     <section class="card">${factsHtml(s)}</section>
+    ${levelsTableHtml(s)}
     ${warnHtml(s)}
     ${toolbar}
     ${chartsHtml}`
@@ -218,13 +280,13 @@ function rankTableHtml(
     .map((s) => {
       const p = s.product
       const href = linkFor(p.id)
-      const name = esc(p.productCode ?? p.sourceFile)
+      const name = esc(productLabel(p))
       // The product cell is a real <a> (not just a click handler on the row) so the ranking
       // stays keyboard-navigable and the target is visible on hover.
       const cell = href ? `<a href="${href}">${name}</a>` : name
       const attrs = sortAttrs([
         ['rank', s.rank],
-        ['product', p.productCode ?? p.sourceFile],
+        ['product', productLabel(p)],
         ['underlying', p.underlyings.join(', ')],
         ['coupon', p.couponPa],
         ['strike', p.strikePct],
@@ -298,9 +360,9 @@ function rankingViewHtml(byWindow: WindowItems[], unranked: DetailProduct[], lin
         return `<div class="panel" data-win="${w.windowMonths}" data-profile="${profile}"${wi === 0 && pi === 0 ? '' : ' hidden'}>
           <div class="panel-head">ย้อนหลัง ${esc(windowLabel(w.windowMonths))} · ${esc(PROFILE_LABELS[profile])}</div>
           <div class="panel-note">${note}</div>
-          <div class="grouphead"><span class="badge pass">Historical Pass</span><span class="muted">${pass.length} รายการ</span></div>
+          <div class="grouphead"><span class="badge pass">${esc(verdictLabel('pass', w.windowMonths))}</span><span class="muted">${pass.length} รายการ</span></div>
           ${table(pass, TEAL)}
-          <div class="grouphead"><span class="badge knock">Historical Knocked</span><span class="muted">${knocked.length} รายการ</span></div>
+          <div class="grouphead"><span class="badge knock">${esc(verdictLabel('knocked', w.windowMonths))}</span><span class="muted">${knocked.length} รายการ</span></div>
           ${table(knocked, CORAL)}
         </div>`
       }),
@@ -599,6 +661,18 @@ h2 { font-size: 15.5px; margin: 24px 0 8px; color: #5b5bef }
 .badge.pass { color: #0a8f63; background: #e3f6ee; border-color: #9fe1cb }
 .badge.knock { color: #d62f2f; background: #fdeaea; border-color: #f2b0b0 }
 .badge.invx { color: #854f0b; background: #faeeda; border-color: #ef9f27 }
+/* Interest-per-month hero — deliberately the loudest block on a product page. */
+.hero { display: grid; grid-template-columns: minmax(240px, 1fr) auto; gap: 6px 24px; padding: 16px 20px; border: 2px solid #0a8f63; background: linear-gradient(180deg, #f2fbf7, #e3f6ee) }
+.hero-k { font-size: 11.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: #0a6e4d }
+.hero-v { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 30px; font-weight: 700; color: #0a8f63; line-height: 1.2 }
+.hero-side { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 22px; font-size: 13px }
+.hero-side > div { display: flex; flex-direction: column; gap: 2px }
+.hero-sk { font-size: 11px; color: #6e6e78; text-transform: uppercase; letter-spacing: 0.05em }
+.hero-sv { font-weight: 600 }
+.hero-calc { grid-column: 1 / -1; font-size: 12.5px; color: #1a1a1f; background: rgba(255,255,255,0.75); border: 1px solid #9fe1cb; border-radius: 8px; padding: 8px 12px }
+.levels { margin-bottom: 16px }
+.levels td { font-family: 'IBM Plex Mono', ui-monospace, monospace }
+.levels td:first-child { font-family: inherit }
 .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 2px 28px; padding: 14px 18px; font-size: 13.5px }
 .fact { display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px dashed #e5e5ea; padding: 6px 0 }
 .fact-k { color: #6e6e78 }

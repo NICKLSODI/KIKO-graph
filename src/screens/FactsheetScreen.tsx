@@ -1,10 +1,12 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { C } from '../theme'
-import { FlowShell, FlowNav, Card, NavBtn } from '../ui/components'
+import { FlowShell, Card } from '../ui/components'
 import { renderFactsheet, MAPPED_PRODUCT_KEYS } from '../features/factsheet/adapter'
+import { productLabel } from '../features/backtest/types'
 import type { AppState, Patch } from '../store'
 
-// A4 page geometry from memie's factsheet_generator (794×1123 px = A4 @96dpi).
+// A4 @96dpi, portrait — the starting guess. KIKO renders landscape (1123×794) and other
+// layouts can grow past one page, so the preview measures the rendered page and follows it.
 const PAGE_W = 794
 const PAGE_H = 1123
 
@@ -15,56 +17,71 @@ export function FactsheetScreen({ state, patch }: { state: AppState; patch: Patc
   const product = state.selectedProduct
   const [lang, setLang] = useState<'th' | 'en'>('th')
   const [override, setOverride] = useState('')
+  const [pngBusy, setPngBusy] = useState(false)
 
-  // Scale the fixed-width A4 page down to whatever width the card gives us.
+  // Scale the page down to whatever width the card gives us.
   const wrapRef = useRef<HTMLDivElement>(null)
   const [scale, setScale] = useState(1)
+  const [page, setPage] = useState({ w: PAGE_W, h: PAGE_H })
   useLayoutEffect(() => {
     const el = wrapRef.current
     if (!el) return
-    const measure = () => setScale(Math.min(1, el.clientWidth / PAGE_W))
+    const measure = () => setScale(Math.min(1, el.clientWidth / page.w))
     measure()
     const ro = new ResizeObserver(measure)
     ro.observe(el)
     return () => ro.disconnect()
-  }, [product])
+  }, [product, page.w])
+
+  // The generator decides the page geometry (portrait A4, or landscape for KIKO), so read it
+  // back off the rendered document instead of hard-coding either one here.
+  function measurePage(e: React.SyntheticEvent<HTMLIFrameElement>) {
+    const el = e.currentTarget.contentDocument?.querySelector('.page') as HTMLElement | null
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    setPage({ w: Math.ceil(rect.width) || PAGE_W, h: Math.ceil(rect.height) || PAGE_H })
+  }
 
   const render = useMemo(
     () => (product ? renderFactsheet(product, lang, override || undefined, state.notional, state.spots, state.spotAsOf) : null),
     [product, lang, override, state.notional, state.spots, state.spotAsOf],
   )
 
-  function openPrint() {
-    if (!render) return
-    const w = window.open('', '_blank')
-    if (!w) return
-    w.document.write(render.html)
-    w.document.close()
-    w.focus()
-    // Give the fonts/logo a beat to lay out before the print dialog snapshots the page.
-    setTimeout(() => w.print(), 300)
-  }
+  const fileBase = () =>
+    `factsheet-${(product ? productLabel(product) : render?.key ?? 'factsheet').replace(/[^\w.-]+/g, '_')}-${lang}`
 
-  function downloadHtml() {
-    if (!render || !product) return
-    const blob = new Blob([render.html], { type: 'text/html;charset=utf-8' })
+  function save(blob: Blob, filename: string) {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `factsheet-${(product.productCode ?? render.key).replace(/[^\w.-]+/g, '_')}-${lang}.html`
+    a.download = filename
     a.click()
     URL.revokeObjectURL(url)
   }
 
+  // PNG is the only export the desk uses — the sheet goes straight into LINE/chat like the
+  // backtest images. Rasterized from the very markup the preview shows — nothing is dropped.
+  async function downloadPng() {
+    if (!render || !product) return
+    setPngBusy(true)
+    try {
+      const { factsheetPngBlob } = await import('../features/factsheet/exportImage')
+      save(await factsheetPngBlob(render.html), `${fileBase()}.png`)
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'สร้างรูป PNG ไม่สำเร็จ')
+    } finally {
+      setPngBusy(false)
+    }
+  }
+
   if (!product) {
     return (
-      <FlowShell maxWidth={640} title="Factsheet" subtitle="Simplified Factsheet (Key Highlight)">
+      <FlowShell maxWidth={640} title="Factsheet" subtitle="Simplified Factsheet (Key Highlight)" back={{ label: 'Dashboard', onClick: () => patch({ screen: 'backtest' }) }}>
         <Card>
           <div style={{ fontSize: 13, color: C.muted }}>
             ยังไม่ได้เลือกผลิตภัณฑ์ — กลับไปที่ Dashboard แล้วกด "สร้าง Factsheet" ที่หน้ารายละเอียดผลิตภัณฑ์
           </div>
         </Card>
-        <FlowNav back={{ label: 'Dashboard', onClick: () => patch({ screen: 'backtest' }) }} />
       </FlowShell>
     )
   }
@@ -74,7 +91,8 @@ export function FactsheetScreen({ state, patch }: { state: AppState; patch: Patc
       maxWidth={900}
       title="Factsheet"
       subtitle="Simplified Factsheet (Key Highlight) — สร้างจากข้อมูลที่สกัดจากเอกสาร"
-      product={product.productCode ?? product.sourceFile}
+      product={productLabel(product)}
+      back={{ label: 'Dashboard', onClick: () => patch({ screen: 'backtest' }) }}
     >
       <Card>
         {/* Controls */}
@@ -95,10 +113,21 @@ export function FactsheetScreen({ state, patch }: { state: AppState; patch: Patc
               </button>
             ))}
           </div>
-          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-            <NavBtn onClick={openPrint} secondary>พิมพ์ / บันทึก PDF</NavBtn>
-            <NavBtn onClick={downloadHtml} secondary>ดาวน์โหลด HTML</NavBtn>
-          </div>
+          {/* PNG is the one export path — a single loud button instead of three quiet ones. */}
+          <button
+            className="btn-primary"
+            onClick={downloadPng}
+            disabled={pngBusy}
+            style={{
+              marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8,
+              padding: '13px 26px', borderRadius: 10, border: '1px solid transparent',
+              background: C.primary, color: C.onPrimary, fontSize: 15.5, fontWeight: 700,
+              letterSpacing: 0.2, boxShadow: '0 2px 8px rgba(0,0,0,0.18)',
+              cursor: pngBusy ? 'default' : 'pointer', opacity: pngBusy ? 0.7 : 1,
+            }}
+          >
+            {pngBusy ? 'กำลังสร้างรูป…' : '⬇  ดาวน์โหลด PNG'}
+          </button>
         </div>
 
         {/* Data-provenance banner */}
@@ -116,18 +145,18 @@ export function FactsheetScreen({ state, patch }: { state: AppState; patch: Patc
         {/* A4 preview, scaled to fit */}
         <div ref={wrapRef} style={{ width: '100%' }}>
           {render && (
-            <div style={{ height: PAGE_H * scale, overflow: 'hidden', borderRadius: 8, border: `1px solid ${C.border}` }}>
+            <div style={{ height: page.h * scale, overflow: 'hidden', borderRadius: 8, border: `1px solid ${C.border}` }}>
               <iframe
                 title="factsheet"
                 srcDoc={render.html}
-                style={{ width: PAGE_W, height: PAGE_H, border: 'none', transform: `scale(${scale})`, transformOrigin: 'top left', background: '#fff' }}
+                onLoad={measurePage}
+                style={{ width: page.w, height: page.h, border: 'none', transform: `scale(${scale})`, transformOrigin: 'top left', background: '#fff' }}
               />
             </div>
           )}
         </div>
       </Card>
 
-      <FlowNav back={{ label: 'Dashboard', onClick: () => patch({ screen: 'backtest' }) }} />
     </FlowShell>
   )
 }

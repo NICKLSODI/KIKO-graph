@@ -162,7 +162,7 @@ function kikoData(deal){
   // Spot-based basket (official reference layout — Spot / Strike / KO / KI in currency +
   // Shares for Delivery) when latest market closes were supplied via deal.spots; the money
   // levels are CALCULATED as stated-% × spot, and shares as notional ÷ strike rounded down
-  // to the board lot — arithmetic on real quotes, flagged as indicative in _basketNote.
+  // to the board lot — arithmetic on real quotes, indicative until fixed on the trade date.
   // Falls back to the %-only basket when no spot data is available.
   const spots = deal.spots || null;
   const hasSpots = !!spots && deal.underlyings.some(u => num(spots[u]) != null);
@@ -197,14 +197,7 @@ function kikoData(deal){
       ki_cols: [], ko_cols: [],
     };
   }
-  const basketNote = hasSpots ? L(
-    `<b>Spot prices:</b> latest available market close${deal.spotAsOf ? ' (as of ' + _displayDate(deal.spotAsOf) + ')' : ''} — ${cur} levels and share counts are calculated from Spot × the stated % levels and are indicative until fixed on the trade date.`,
-    `<b>ราคา Spot:</b> ราคาปิดตลาดล่าสุด${deal.spotAsOf ? ' (ณ ' + _displayDate(deal.spotAsOf) + ')' : ''} — ระดับราคา${cur === 'THB' ? 'เป็นบาท' : 'สกุล ' + cur} และจำนวนหุ้นคำนวณจาก Spot × % ที่ระบุ เป็นค่าโดยประมาณจนกว่าจะกำหนดจริง ณ วันซื้อขาย`) : null;
-
   const issuer = deal.issuer;
-  const payoffNote = L(
-    `<b>How the payoff works:</b> if all stocks are ≥ ${or(lv.ko)} on an observation date → the note auto-redeems early with the coupon. If it is never called and no stock breaches Knock-In (${or(lv.ki)}) → principal + coupon at maturity. If a stock breaches Knock-In and closes below Strike (${or(lv.strike)}) → you receive shares and may realise a loss (not principal protected).`,
-    `<b>วิธีคิดผลตอบแทน:</b> ถ้าหุ้นทุกตัว ≥ ${or(lv.ko)} ณ วันสังเกต → ไถ่ถอนก่อนกำหนดพร้อมคูปอง · ถ้าไม่ถูกไถ่ถอนและไม่มีหุ้นแตะ Knock-In (${or(lv.ki)}) → คืนเงินต้น + คูปอง ณ ครบกำหนด · ถ้ามีหุ้นแตะ Knock-In และปิด < Strike (${or(lv.strike)}) → รับเป็นหุ้น อาจขาดทุน (ไม่คุ้มครองเงินต้น)`);
 
   // Schedule dates are CALCULATED from Issue Date + stated observation frequency (never
   // taken verbatim from a per-period date list, since real deals often only state the
@@ -214,14 +207,19 @@ function kikoData(deal){
   // asserting a Thai tax rate on foreign-currency deals).
   const couponPct = num(lv.coupon);
   const ppy = _periodsPerYear(lv.koObs);
-  // Net-interest-after-tax is shown only for MONTHLY THB notes: the render engine's built-in
-  // "Calculation:" caption is hard-coded to THB and ÷12, so a quarterly note would be
-  // mislabelled. For quarterly / foreign-currency notes we show subscription but not net
-  // interest (never assert a wrong period or a Thai WHT on a non-THB deal).
-  const showNetInterest = notional != null && cur === 'THB' && couponPct != null && ppy === 12
-  const netPerPeriod = showNetInterest ? notional * (couponPct / 100) / 12 * (1 - WHT_RATE) : null;
+  // Interest per month is the headline number the desk sells on, so it is shown for every
+  // note that states a notional and a coupon. THB notes are quoted NET of the 15% Thai
+  // withholding tax (what actually lands in the account); other currencies are quoted GROSS,
+  // because a Thai WHT rate must never be asserted on a non-THB deal. It is a per-month
+  // figure off the annual coupon (coupon p.a. ÷ 12) regardless of the payment frequency.
+  const showMonthly = notional != null && couponPct != null;
+  const monthlyIsNet = cur === 'THB';
+  const monthlyInterest = showMonthly ? notional * (couponPct / 100) / 12 * (monthlyIsNet ? 1 - WHT_RATE : 1) : null;
 
-  const schedule = kikoSchedule(deal, couponPct, showNetInterest ? { notional, cur } : null);
+  // The schedule's per-PERIOD net column stays gated to monthly THB notes — its arithmetic
+  // is per observation period, so a quarterly note would be mislabelled by it.
+  const showScheduleNet = showMonthly && monthlyIsNet && ppy === 12;
+  const schedule = kikoSchedule(deal, couponPct, showScheduleNet ? { notional, cur } : null);
   const scheduleNote = schedule ? L(
     'Dates are calculated from the Issue Date and the stated monthly/quarterly observation frequency — the live term sheet may shift each date by a few days for business-day/weekend adjustment.',
     'วันที่คำนวณจากวันออกตราสารและความถี่การสังเกตที่ระบุไว้ (รายเดือน/รายไตรมาส) — term sheet ฉบับจริงอาจคลาดเคลื่อนไม่กี่วันจากการปรับวันทำการ') : null;
@@ -233,8 +231,11 @@ function kikoData(deal){
         { l: L('Coupon', 'คูปอง'), v: or(lv.coupon), c: 'purple' },
         { l: L('Tenor', 'อายุตราสาร'), v: or(deal.tenor), c: '' },
         { l: L('Min. Subscription', 'มูลค่าจองซื้อขั้นต่ำ'), v: _money(cur, notional), c: 'sm' },
-        ...(showNetInterest ? [{ l: L('Net Interest / Month', 'ดอกเบี้ยสุทธิ / เดือน'), v: _money(cur, Math.round(netPerPeriod)), c: 'green' }]
-                            : [{ l: L('Strike', 'Strike'), v: or(lv.strike), c: 'sm' }]),
+        ...(showMonthly ? [{
+              l: monthlyIsNet ? L('Net Interest / Month', 'ดอกเบี้ยสุทธิ / เดือน') : L('Interest / Month', 'ดอกเบี้ย / เดือน'),
+              v: _money(cur, monthlyInterest, 2), c: 'green',
+            }]
+                        : [{ l: L('Strike', 'Strike'), v: or(lv.strike), c: 'sm' }]),
       ]
     : metricsFor({ l: L('Coupon', 'คูปอง'), v: or(lv.coupon), c: 'purple' }, deal.tenor, lv.strike, issuer);
 
@@ -248,8 +249,10 @@ function kikoData(deal){
     metrics,
     dates: datesFor(deal.dates),
     conds, basket, schedule,
-    _payoffNote: payoffNote,
-    _basketNote: basketNote,
+    // Stated % levels, kept raw for the KIKO sheet's column headers ("Strike Price (95%)").
+    _levels: { strike: lv.strike || null, ko: lv.ko || null, ki: lv.ki || null, coupon: lv.coupon || null },
+    _currency: cur,
+    _hasSpots: hasSpots,
     _scheduleNote: scheduleNote,
     _dealNotes: dealNotes(deal.notes),
   };

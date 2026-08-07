@@ -1,17 +1,18 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { C } from '../../theme'
 import { Screen, Card, NavBtn, IconOptions } from '../../ui/components'
-import { IconUpload, IconSearch, IconBarChart, IconTrophy, IconChevronRight, IconFileText, IconAlignLeft, IconCheck, IconMail } from '../../ui/icons'
+import { IconUpload, IconDownload, IconSearch, IconBarChart, IconTrophy, IconChevronRight, IconFileText, IconAlignLeft, IconCheck, IconMail } from '../../ui/icons'
 import { CandleChart } from '../../components/CandleChart'
+import { EmailChipsInput, isValidEmail, parseEmails } from '../../components/EmailChipsInput'
 import { checkAiHealth, friendlyError, isAuthError, startClaudeLogin, type AiHealth, type GenerateFile } from '../../api/generate'
 import { extractNotesFromSource, type NoteSource } from '../../features/backtest/extract'
 import { koTimesFor, levelsAndMarksFor } from '../../features/backtest/chartData'
 import type { InputMode } from '../../types'
 import { backtestScore, backtestDetail } from '../../features/backtest/engine'
 import { scoreProducts, weightsFor, PROFILE_LABELS } from '../../features/backtest/scoring'
-import { exportBatchFiles, buildBatchPackage, sendEmailNow, batchZipFilename, reportHtmlFilename, EXPORT_WINDOWS, printProductReport, downloadProductJpg, downloadProductInteractiveHtml, type WindowItems } from '../../features/backtest/exportReport'
+import { exportBatchFiles, buildBatchPackage, sendEmailNow, batchZipFilename, reportHtmlFilename, EXPORT_WINDOWS, downloadProductJpg, type WindowItems } from '../../features/backtest/exportReport'
 import type { BacktestResult, DetailProduct, NoteProduct, ProfileKey, ScoredProduct } from '../../features/backtest/types'
-import { STRUCTURE_TYPE_LABELS, koObservationLabel, kiObservationLabel } from '../../features/backtest/types'
+import { STRUCTURE_TYPE_LABELS, koObservationLabel, kiObservationLabel, productLabel, notionalFor, monthlyInterest, sharesForDelivery, verdictLabel, seriesVerdict, seriesVerdictLabel } from '../../features/backtest/types'
 import type { RetrievedProductData } from '../../features/ingest/ingest'
 import type { Patch } from '../../store'
 
@@ -97,7 +98,7 @@ function PipelineStrip({ stage }: { stage: number }) {
 function toRetrieved(p: NoteProduct): RetrievedProductData {
   return {
     summary: p.summary,
-    productName: p.productCode ?? p.sourceFile,
+    productName: productLabel(p),
     productType: STRUCTURE_TYPE_LABELS[p.structureType],
     strike: p.strikePct,
     knockIn: p.kiPct,
@@ -163,11 +164,16 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   const [printing, setPrinting] = useState(false)
   // Batch-zip progress text (null = idle) — shown on the ranking header button.
   const [zipping, setZipping] = useState<string | null>(null)
-  // Email flow: recipients textarea + panel toggle + progress text.
-  // Recipients persist in localStorage — they're usually the same people, so prefill next time.
+  // Email flow: recipient chips + panel toggle + progress text.
+  // Recipients persist in localStorage — they're usually the same people, so prefill next time
+  // (stored comma-joined, which is also what the old free-text field wrote, so it still loads).
   const [emailOpen, setEmailOpen] = useState(false)
-  const [emailRecipients, setEmailRecipients] = useState(() => {
-    try { return localStorage.getItem('kiko.emailRecipients') || '' } catch { return '' }
+  const [emailRecipients, setEmailRecipients] = useState<string[]>(() => {
+    try { return parseEmails(localStorage.getItem('kiko.emailRecipients') || '') } catch { return [] }
+  })
+  // Addresses that were actually sent to before — offered as one-click chips.
+  const [emailHistory, setEmailHistory] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem('kiko.emailHistory') || '[]') as string[] } catch { return [] }
   })
   const [emailing, setEmailing] = useState<string | null>(null)
   const [emailDone, setEmailDone] = useState<string | null>(null)
@@ -450,9 +456,16 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   // real via the Outlook COM object (attaches every file + .Send()), the same pattern as
   // fundconnext_portfolio.py. Sending is irreversible, so we confirm the recipient count first.
   async function handleSendEmail() {
-    const recips = emailRecipients.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean)
+    const recips = emailRecipients
     if (!recips.length) {
       setErrors((prev) => [...prev, 'กรอกอีเมลผู้รับอย่างน้อย 1 คนก่อนส่ง'])
+      return
+    }
+    // The chip input flags these in red, but re-check here so a bad address can never
+    // reach Outlook (the send is irreversible and a bounce is silent).
+    const bad = recips.filter((r) => !isValidEmail(r))
+    if (bad.length) {
+      setErrors((prev) => [...prev, `อีเมลผู้รับรูปแบบไม่ถูกต้อง: ${bad.join(', ')}`])
       return
     }
     if (emailing) return
@@ -476,7 +489,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
         `<p>แนบสรุปและจัดอันดับ KIKO ประจำวันที่ ${today}</p>`,
         `<ul>`,
         `<li><b>${reportHtmlFilename()}</b> — เปิดไฟล์นี้ในเบราว์เซอร์: หน้าจัดอันดับ เลือกช่วงย้อนหลัง 6 เดือน / 1 ปี / 2 ปี และโปรไฟล์คะแนน All / Aggressive / Safe ได้ (All จัดเรียงเองได้ Aggressive กับ Safe ตำแหน่งคงที่) กดชื่อ product เพื่อเข้าไปดูรายละเอียดและกราฟที่เลื่อน/ซูมได้</li>`,
-        `<li>ไฟล์ ZIP: <code>png-for-line/</code> รูปส่งไลน์, <code>factsheet_th/</code> + <code>factsheet_en/</code> factsheet รายตัว, และ <code>summary.csv</code> (มีสำเนาไฟล์รายงานด้านบนอยู่ใน ZIP ด้วย)</li>`,
+        `<li>ไฟล์ ZIP: <code>png-for-line/</code> รูปส่งไลน์, <code>factsheet_th/</code> + <code>factsheet_en/</code> factsheet รายตัวเป็นรูป .png, และ <code>summary.csv</code> (มีสำเนาไฟล์รายงานด้านบนอยู่ใน ZIP ด้วย)</li>`,
         `</ul>`,
         ...(sourceText ? [
           `<p style="font-weight:600;margin:16px 0 6px">ข้อมูลตั้งต้น (ข้อความที่สกัด):</p>`,
@@ -509,6 +522,12 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
         }
       }
       setEmailDone(`✅ ส่งอีเมลแล้ว (${result!.recipients.length} คน, ไฟล์แนบ ${result!.attachments} รายการ) ผ่าน Outlook`)
+      // Remember who was actually mailed so next time they're a one-click chip.
+      setEmailHistory((prev) => {
+        const merged = [...recips, ...prev.filter((p) => !recips.some((r) => r.toLowerCase() === p.toLowerCase()))].slice(0, 12)
+        try { localStorage.setItem('kiko.emailHistory', JSON.stringify(merged)) } catch { /* ignore quota/privacy-mode */ }
+        return merged
+      })
     } catch (err) {
       setErrors((prev) => [...prev, `ส่งอีเมลไม่สำเร็จ: ${friendlyError(err)}`])
     } finally {
@@ -516,13 +535,13 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
     }
   }
 
-  async function handleExportSelected(format: 'pdf' | 'jpg' | 'html') {
+  // Per-product export is the LINE-ready chart image. PDF and interactive HTML are still
+  // produced by the batch package, which is where they are actually used.
+  async function handleExportSelected() {
     if (!selected) return
     setPrinting(true)
     try {
-      if (format === 'pdf') await printProductReport(selected, windowMonths)
-      else if (format === 'html') await downloadProductInteractiveHtml(selected, windowMonths)
-      else await downloadProductJpg(selected, windowMonths)
+      await downloadProductJpg(selected, windowMonths)
     } finally {
       setPrinting(false)
     }
@@ -544,6 +563,9 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   }
 
   function sortRows(group: ScoredProduct[]): ScoredProduct[] {
+    // Aggressive / Safe: the order IS the answer (rank by that profile's weights), so it is
+    // fixed and the headers aren't clickable — same rule the exported HTML report follows.
+    if (profile !== 'all') return [...group].sort((a, b) => a.rank - b.rank)
     const val = (s: ScoredProduct): number => {
       switch (sortKey) {
         case 'rank': return s.rank
@@ -754,8 +776,11 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   const th = { padding: '10px 12px', fontSize: 12, fontWeight: 600, color: C.muted, textAlign: 'left' as const, whiteSpace: 'nowrap' as const }
   const td = { padding: '10px 12px', fontSize: 13.5, color: C.text, borderTop: `1px solid ${C.border}` }
   // Every sortable header carries a dotted underline + a ⇅ glyph (▲/▼ when active) so it's
-  // obvious it can be clicked, without having to guess-and-click first.
+  // obvious it can be clicked, without having to guess-and-click first. Under Aggressive /
+  // Safe the ranking is fixed, so the header renders plain — no affordance, no click.
+  const canSort = profile === 'all'
   const sortableTh = (label: string, key: SortKey) => {
+    if (!canSort) return <th style={th} title={`เรียงตามคะแนนโปรไฟล์ ${PROFILE_LABELS[profile]} — ตำแหน่งคงที่`}>{label}</th>
     const active = sortKey === key
     return (
       <th
@@ -797,7 +822,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
               <tr key={s.product.id} className="row-hover">
                 <td style={td}><span className={`rank-chip${s.rank <= 3 ? ' top' : ''}`}>{String(s.rank).padStart(2, '0')}</span></td>
                 <td style={{ ...td, fontWeight: 600 }}>
-                  {s.product.productCode ?? s.product.sourceFile}
+                  {productLabel(s.product)}
                   {s.product.invxPick && <span className="badge invx" style={{ marginLeft: 8 }} title="ผลิตภัณฑ์ที่ INVX แนะนำ">💎 INVX Pick</span>}
                 </td>
                 <td style={td}>
@@ -869,7 +894,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
                 onClick={() => {
                   if (!selected) return
                   const p = selected.product
-                  patch({ selectedProduct: p, retrieved: toRetrieved(p), targetProduct: p.productCode ?? p.sourceFile, screen: 'persona' })
+                  patch({ selectedProduct: p, retrieved: toRetrieved(p), targetProduct: productLabel(p), screen: 'persona' })
                 }}
                 style={{ padding: '9px 14px', borderRadius: 8, border: `1px solid ${C.primaryBorder}`, background: C.primaryLight, color: C.primary, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}
               >
@@ -902,23 +927,18 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
               >
                 📄 สร้าง Factsheet
               </button>
-              <select
-                value=""
+              {/* One export the desk actually uses — the chart image that gets sent on LINE. */}
+              <button
                 disabled={printing || !selected}
-                onChange={(e) => {
-                  const format = e.target.value as 'pdf' | 'jpg' | 'html'
-                  if (format) handleExportSelected(format)
-                }}
-                style={{ padding: '9px 14px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.text, color: C.white, fontSize: 13, fontWeight: 600, cursor: printing || !selected ? 'default' : 'pointer' }}
+                onClick={() => handleExportSelected()}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 7, padding: '9px 14px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.text, color: C.white, fontSize: 13, fontWeight: 600, cursor: printing || !selected ? 'default' : 'pointer', opacity: printing || !selected ? 0.6 : 1 }}
               >
-                <option value="" disabled>{printing ? 'กำลังสร้างไฟล์...' : 'ดาวน์โหลดตะกร้านี้'}</option>
-                <option value="pdf">บันทึกเป็น PDF</option>
-                <option value="jpg">บันทึกเป็น JPG (ส่งไลน์)</option>
-                <option value="html">บันทึกเป็น HTML (กราฟกดเล่นได้)</option>
-              </select>
+                <IconDownload size={14} />
+                {printing ? 'กำลังสร้างรูป...' : 'โหลดรูปกราฟสำหรับส่ง LINE'}
+              </button>
             </div>
           </div>
-          <DetailGraphView key={selected?.product.id ?? 'none'} selected={selected} showScore={profile !== 'all'} hasFile={!!(selected && fileById[selected.product.id])} onPreview={() => selected && openPreview(selected.product.id)} notional={notional} setNotional={setNotional} isLoadingChart={loadingChartId === selected?.product.id} />
+          <DetailGraphView key={selected?.product.id ?? 'none'} selected={selected} showScore={profile !== 'all'} hasFile={!!(selected && fileById[selected.product.id])} onPreview={() => selected && openPreview(selected.product.id)} notional={notional} setNotional={setNotional} isLoadingChart={loadingChartId === selected?.product.id} windowMonths={windowMonths} />
         </Card>
 
         {preview && (
@@ -1002,18 +1022,18 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
             <div style={{ fontSize: 12, color: C.muted, marginBottom: 8, lineHeight: 1.6 }}>
               ระบบจะสร้าง<b>รายงาน HTML ไฟล์เดียว</b> (หน้าจัดอันดับ 6 เดือน / 1 ปี / 2 ปี กดชื่อ product เข้าไปดูกราฟที่เลื่อน/ซูมได้) + ZIP (รูปส่งไลน์, factsheet TH/EN, summary.csv) แล้ว<b>ส่งอีเมลจริงทันที</b>ผ่าน Outlook — มีหน้าต่างยืนยันก่อนส่ง (ส่งแล้วยกเลิกไม่ได้ · ต้องเปิด Outlook ค้างไว้ + login แล้ว)
             </div>
-            <textarea
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 5 }}>ผู้รับ</label>
+            <EmailChipsInput
               value={emailRecipients}
-              onChange={(e) => {
-                setEmailRecipients(e.target.value)
-                try { localStorage.setItem('kiko.emailRecipients', e.target.value) } catch { /* ignore quota/privacy-mode */ }
+              onChange={(next) => {
+                setEmailRecipients(next)
+                try { localStorage.setItem('kiko.emailRecipients', next.join(', ')) } catch { /* ignore quota/privacy-mode */ }
               }}
-              placeholder="อีเมลผู้รับ คั่นด้วย , หรือขึ้นบรรทัดใหม่&#10;เช่น a@invx.com, b@invx.com"
-              rows={3}
-              style={{ width: '100%', padding: '8px 10px', borderRadius: 8, border: `1px solid ${C.border}`, fontSize: 13, boxSizing: 'border-box', resize: 'vertical', fontFamily: 'inherit', marginBottom: 8 }}
+              history={emailHistory}
+              placeholder="พิมพ์อีเมลแล้วกด Enter — วางหลายอีเมลพร้อมกันได้ เช่น a@invx.com"
             />
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <NavBtn onClick={handleSendEmail} disabled={!!emailing || !emailRecipients.trim()}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
+              <NavBtn onClick={handleSendEmail} disabled={!!emailing || !emailRecipients.length || emailRecipients.some((r) => !isValidEmail(r))}>
                 {emailing ?? 'ส่งอีเมลอัตโนมัติทันที'}
               </NavBtn>
               {emailDone && <span style={{ fontSize: 12, color: C.teal, lineHeight: 1.5 }}>{emailDone}</span>}
@@ -1028,19 +1048,19 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
             <div className="s">KIKO {kikoItems.length} · อื่นๆ {otherItems.length} · แบ็คเทสต์ {windowMonths} เดือน</div>
           </div>
           <div className="tile">
-            <div className="k">Historical Pass (KIKO)</div>
+            <div className="k">KI ยังลึกกว่าราคาต่ำสุด</div>
             <div className="v" style={{ color: 'var(--c-teal)' }}>{passGroup.length}</div>
-            <div className="s">ไม่เคยชน KI</div>
+            <div className="s">{verdictLabel('pass', windowMonths)}</div>
           </div>
           <div className="tile">
-            <div className="k">Historical Knocked (KIKO)</div>
+            <div className="k">KI อยู่สูงกว่าราคาต่ำสุด</div>
             <div className="v" style={{ color: 'var(--c-coral)' }}>{knockedGroup.length}</div>
-            <div className="s">เคยชน KI ในช่วงที่ดู</div>
+            <div className="s">{verdictLabel('knocked', windowMonths)}</div>
           </div>
           <div className="tile">
             <div className="k">อันดับ 1 (Pass)</div>
             <div className="v">{bestPass ? bestPass.score : '–'}</div>
-            <div className="s" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bestPass ? (bestPass.product.productCode ?? bestPass.product.sourceFile) : 'ไม่มีรายการ Pass'}</div>
+            <div className="s" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bestPass ? productLabel(bestPass.product) : 'ไม่มีรายการ Pass'}</div>
           </div>
         </div>
 
@@ -1097,13 +1117,13 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
           <span style={{ fontSize: 12.5, color: C.muted }}>{kikoItems.length} รายการ — จัดอันดับตามโปรไฟล์คะแนนที่เลือก{stockChips.length ? ` · กรอง ${stockChips.join(', ')}` : ''}</span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '10px 0 8px' }}>
-          <span className="badge pass">Historical Pass</span>
-          <span style={{ fontSize: 12.5, color: C.muted }}>{passShown.length} รายการ — ไม่เคยชน KI</span>
+          <span className="badge pass">{verdictLabel('pass', windowMonths)}</span>
+          <span style={{ fontSize: 12.5, color: C.muted }}>{passShown.length} รายการ</span>
         </div>
         {renderTable(passShown, C.teal)}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '20px 0 8px' }}>
-          <span className="badge knock">Historical Knocked</span>
-          <span style={{ fontSize: 12.5, color: C.muted }}>{knockedShown.length} รายการ — เคยชน KI</span>
+          <span className="badge knock">{verdictLabel('knocked', windowMonths)}</span>
+          <span style={{ fontSize: 12.5, color: C.muted }}>{knockedShown.length} รายการ</span>
         </div>
         {renderTable(knockedShown, C.coral)}
 
@@ -1145,7 +1165,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
                     <tr key={it.product.id} className="row-hover">
                       <td style={td}><span className="badge plain">{STRUCTURE_TYPE_LABELS[it.product.structureType]}</span></td>
                       <td style={{ ...td, fontWeight: 600 }}>
-                        {it.product.productCode ?? it.product.sourceFile}
+                        {productLabel(it.product)}
                         {it.product.invxPick && <span className="badge invx" style={{ marginLeft: 8 }} title="ผลิตภัณฑ์ที่ INVX แนะนำ">💎 INVX Pick</span>}
                       </td>
                       <td style={td}>{it.product.underlyings.join(', ') || '-'}</td>
@@ -1194,7 +1214,7 @@ export function BacktestDashboard({ patch }: { patch: Patch }) {
   )
 }
 
-function DetailGraphView({ selected, showScore, hasFile, onPreview, notional, setNotional, isLoadingChart }: { selected: DetailProduct | null; showScore: boolean; hasFile: boolean; onPreview: () => void; notional: string; setNotional: (v: string) => void; isLoadingChart: boolean }) {
+function DetailGraphView({ selected, showScore, hasFile, onPreview, notional, setNotional, isLoadingChart, windowMonths }: { selected: DetailProduct | null; showScore: boolean; hasFile: boolean; onPreview: () => void; notional: string; setNotional: (v: string) => void; isLoadingChart: boolean; windowMonths: number }) {
   if (!selected) {
     return (
       <div style={{ textAlign: 'center', padding: '36px 0', color: C.muted }}>
@@ -1212,13 +1232,23 @@ function DetailGraphView({ selected, showScore, hasFile, onPreview, notional, se
   const hasNotional = notional.trim() !== '' && Number.isFinite(notionalNum) && notionalNum > 0
   const notionalCurrency = p.market === 'thai' ? 'บาท' : 'USD'
 
-  // Standard desk ticket size per market — always this default when a product's detail
-  // opens (this component remounts per product, keyed by product id, so this fires once
-  // per product view). USD 30,000 for foreign underlyings, THB 1,000,000 for Thai ones.
+  // Prefilled when a product's detail opens (this component remounts per product, keyed by
+  // product id, so this fires once per product view): the amount the document itself stated
+  // when it printed one, otherwise the desk's standard ticket size for the market
+  // (THB 1,000,000 / USD 30,000). The IC can still type over it.
   useEffect(() => {
-    setNotional(p.market === 'thai' ? '1,000,000' : '30,000')
+    setNotional(notionalFor(p).toLocaleString('en-US'))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // The number the desk leads with: interest per month on the notional. Thai notes are shown
+  // net of 15% WHT (what lands in the account); foreign-currency notes gross, since Thai WHT
+  // must not be asserted on a non-THB deal.
+  const monthly = monthlyInterest(p, hasNotional ? notionalNum : notionalFor(p))
+  const monthlyAmount = monthly
+    ? `${monthly.currency} ${monthly.amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : null
+  const notionalNumDisplay = `${monthly?.currency ?? (p.market === 'thai' ? 'THB' : 'USD')} ${(hasNotional ? notionalNum : notionalFor(p)).toLocaleString('en-US')}`
 
   const koObsText = (() => {
     const explicit = p.koObservationDates.length ? p.koObservationDates : p.observationDates
@@ -1266,11 +1296,11 @@ function DetailGraphView({ selected, showScore, hasFile, onPreview, notional, se
       <div style={{ display: 'flex', alignItems: 'stretch', gap: 16, flexWrap: 'wrap', marginBottom: 6 }}>
         <div style={{ flex: 1, minWidth: 240 }}>
           <div className="overline">รายละเอียดผลิตภัณฑ์</div>
-          <div style={{ fontSize: 22, fontWeight: 700, color: C.text, letterSpacing: '-0.01em', lineHeight: 1.35, margin: '2px 0 10px' }}>{p.productCode ?? p.sourceFile}</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: C.text, letterSpacing: '-0.01em', lineHeight: 1.35, margin: '2px 0 10px' }}>{productLabel(p)}</div>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
             {p.invxPick && <span className="badge invx" title="ผลิตภัณฑ์ที่ INVX แนะนำ">💎 INVX Pick</span>}
             <span className={`badge ${bt.verdict === 'pass' ? 'pass' : 'knock'}`}>
-              {bt.verdict === 'pass' ? 'Historical Pass' : 'Historical Knocked · KI'}
+              {verdictLabel(bt.verdict, windowMonths)}
             </span>
             <span className="badge plain">{STRUCTURE_TYPE_LABELS[p.structureType]}</span>
             <span className="badge plain">KO: {vf?.koObservation ?? koObservationLabel(p)}</span>
@@ -1298,6 +1328,13 @@ function DetailGraphView({ selected, showScore, hasFile, onPreview, notional, se
           <div className="v">{fmtPct(p.couponPa)}</div>
           <div className="s">ดอกเบี้ยต่อปี</div>
         </div>
+        {monthly && (
+          <div className="tile">
+            <div className="k">{monthly.net ? 'ดอกเบี้ยสุทธิ/เดือน' : 'ดอกเบี้ย/เดือน'}</div>
+            <div className="v" style={{ fontSize: 17, color: 'var(--c-teal)' }}>{monthlyAmount}</div>
+            <div className="s">{monthly.net ? `จาก Notional ${notionalNumDisplay} · หลังหัก WHT 15%` : `จาก Notional ${notionalNumDisplay} · ก่อนหักภาษี`}</div>
+          </div>
+        )}
         {hasKi && (
           <div className="tile">
             <div className="k">Knock-In</div>
@@ -1359,14 +1396,25 @@ function DetailGraphView({ selected, showScore, hasFile, onPreview, notional, se
           onChange={(e) => setNotional(e.target.value)}
           style={{ padding: '5px 10px', borderRadius: 8, border: `1px solid ${C.border}`, fontSize: 13, width: 150 }}
         />
-        <span style={{ color: C.muted, fontSize: 12 }}>ใช้คำนวณ "จำนวนหุ้นที่ต้องส่งมอบ" และมูลค่าจองซื้อ/ดอกเบี้ยสุทธิใน Factsheet — ไม่กระทบการแบ็คเทสต์</span>
+        <span style={{ color: C.muted, fontSize: 12 }}>
+          {p.notional != null ? 'ค่าเริ่มต้นจากที่ระบุไว้ในเอกสาร — ' : ''}ใช้คำนวณ "จำนวนหุ้นที่ต้องส่งมอบ" ดอกเบี้ยต่อเดือน และมูลค่าจองซื้อใน Factsheet — ไม่กระทบการแบ็คเทสต์
+        </span>
       </div>
+      {monthly && (
+        <div style={{ fontSize: 12.5, color: C.text, background: C.tealLight, border: `1px solid ${C.tealBorder}`, borderRadius: 8, padding: '8px 12px', marginBottom: 10 }}>
+          <b>วิธีคำนวณ:</b> {notionalNumDisplay} × {fmtPct(p.couponPa)} / 12{monthly.net ? ' × (1 − WHT 15%)' : ''} = <b>{monthlyAmount}</b> ต่อเดือน
+          {!monthly.net && <span style={{ color: C.muted }}> (ก่อนหักภาษี)</span>}
+        </div>
+      )}
       <div style={{ overflowX: 'auto', marginBottom: 8, border: `1px solid ${C.border}`, borderRadius: 10 }}>
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr>
               <th style={{ ...ulTh, borderTopLeftRadius: 9 }}>หุ้นอ้างอิง</th>
-              <th style={ulTh}>Spot Price</th>
+              {/* The reference price the levels are computed from — the term sheet's own stated
+                  price when it printed one, else the close on the fixing date (latest close if
+                  the document gave no date). Not "today's quote", so don't label it Spot. */}
+              <th style={ulTh} title="ราคาอ้างอิงที่ใช้คำนวณ Strike / KO / KI">Reference Spot</th>
               <th style={ulTh}>Strike Level (%)</th>
               <th style={ulTh}>Strike Price</th>
               <th style={ulTh}>KO Level (%)</th>
@@ -1379,7 +1427,7 @@ function DetailGraphView({ selected, showScore, hasFile, onPreview, notional, se
           </thead>
           <tbody>
             {bt.series.map((s, i) => {
-              const shares = hasNotional && s.strikeLevel ? Math.round(notionalNum / s.strikeLevel) : null
+              const shares = sharesForDelivery(hasNotional ? notionalNum : notionalFor(p), s.strikeLevel, p.market)
               const rowBg = i % 2 === 1 ? C.bg : C.white
               return (
                 <tr key={s.symbol} style={{ background: rowBg }}>
@@ -1403,8 +1451,9 @@ function DetailGraphView({ selected, showScore, hasFile, onPreview, notional, se
       {/* Backtest result */}
       <div className="section-h"><span className="overline">ผลแบ็คเทสต์</span></div>
       <div className="fact-grid">
-        {fact('ผลย้อนหลัง', bt.error ? 'ผิดพลาด' : `${bt.verdict === 'pass' ? 'Pass — ไม่เคยชน KI' : 'Knocked — เคยชน KI'}${bt.knockedOut ? ' · เคยชน KO' : ''}`)}
-        {fact('ช่วงที่ทดสอบ', `${bt.windowMonths} เดือนย้อนหลัง`, true)}
+        {/* No basket-level KI verdict line — every chart below carries its own per-stock chip. */}
+        {fact('ช่วงที่ทดสอบ', `${bt.windowMonths} เดือนย้อนหลัง`)}
+        {bt.error ? fact('สถานะ', 'ผิดพลาด', true) : null}
       </div>
       <div className="fact-item" style={{ borderBottom: 'none' }}>
         <span className="fk">วันสังเกตการณ์ KO</span>
@@ -1465,7 +1514,12 @@ function DetailGraphView({ selected, showScore, hasFile, onPreview, notional, se
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', background: C.bg, borderBottom: `1px solid ${C.border}`, flexWrap: 'wrap' }}>
                   <span className="num" style={{ fontSize: 14, fontWeight: 600, color: C.text }}>{s.symbol}</span>
                   <span className="num" style={{ fontSize: 12, color: C.muted }}>ปัจจุบัน {s.currentPrice?.toFixed(2) ?? '-'}</span>
-                  {s.knockedIn && <span className="badge knock" style={{ marginLeft: 'auto' }}>เคยชน KI</span>}
+                  {/* Per-stock, always shown: green = this stock's KI sits below its own lowest
+                      close, red = the price traded through it. A basket-level line alone read as
+                      if it described every chart under it. */}
+                  <span className={`badge ${s.knockedIn ? 'knock' : 'pass'}`} style={{ marginLeft: 'auto' }}>
+                    {seriesVerdictLabel(seriesVerdict(s))}
+                  </span>
                 </div>
                 <div style={{ padding: '8px 8px 0' }}>
                   <CandleChart candles={s.candles} levels={levels} dateMarks={marks} showEma50={showEma50} showEma200={showEma200} />

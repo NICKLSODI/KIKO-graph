@@ -13,10 +13,12 @@ export const NOTE_EXTRACTION_INSTRUCTIONS = `คุณเป็นผู้เ�
 
 {
   "productCode": string | null,        // รหัสผลิตภัณฑ์จริง เช่น SG2606256MKIKOU — ห้ามใช้ "Selling Code"/"รหัสขาย" (ตัวเลขล้วนเช่น 0624304) เป็นค่านี้เด็ดขาด ถ้าไม่มีรหัสผลิตภัณฑ์จริงให้ null
+  "productName": string | null,        // ชื่อผลิตภัณฑ์/ชื่อหุ้นอ้างอิง "ตามที่พิมพ์ไว้ในเอกสารจริง" เช่น "BANGKOK DUSIT MED SERVICE (BDMS)" หรือ "BANGKOK BANK PUBLIC CO LTD (BBL) & CP ALL PCL (CPALL)" — คัดลอกข้อความจากคอลัมน์ชื่อผลิตภัณฑ์/Stock/Underlying ของแถวนั้นมาตรงๆ ห้ามย่อ ห้ามแต่งใหม่ ห้ามใส่ชื่อโครงสร้าง (KIKO/Sharkfin) ถ้าเอกสารไม่ได้เขียนไว้ ถ้าเอกสารไม่มีชื่อให้ null
   "issuer": string | null,             // ผู้ออก เช่น SG, BNPP
   "underlyings": string[],             // หุ้นอ้างอิงทุกตัว (ticker) เช่น ["AMD","MRVL"] — ถ้า basket ต้องครบทุกตัว
   "initialPrices": number[],           // ราคาเริ่มต้น/ราคาอ้างอิง (Initial/Underlying Price) ของหุ้นแต่ละตัว "เรียงลำดับให้ตรงกับ underlyings ทีละตัว" — เอาตัวเลขจริงจากตารางในเอกสาร (เช่น "Underlying price as of ...") ห้ามคำนวณเอง ถ้าตัวใดไม่มีในเอกสารให้เว้นว่างเป็น [] ทั้งชุด
   "market": "thai" | "foreign",        // ตลาดของหุ้นอ้างอิง (foreign=US/ต่างประเทศ)
+  "notional": number | null,           // มูลค่าเงินลงทุน/จองซื้อขั้นต่ำ ถ้าเอกสารหรือรูประบุไว้ เช่น "ลงทุนขั้นต่ำ 5 แสนบาท" → 500000, "THB 1,000,000" → 1000000, "Notional USD 30,000" → 30000 — ใส่ "ตัวเลขล้วน" ไม่มีลูกน้ำ/หน่วย และต้องแปลงคำไทยเป็นตัวเลข (แสน=100000, ล้าน=1000000) ถ้าเอกสารไม่ระบุให้ null (ห้ามเดา)
   "strikePct": number | null,          // ระดับ Strike เป็น % ของราคาเริ่มต้น (ตัวเลขล้วน เช่น 100)
   "kiPct": number | null,              // ระดับ Knock-In เป็น % (null ถ้าโครงสร้างไม่มี KI)
   "koPct": number | null,              // ระดับ Knock-Out เป็น % (null ถ้าไม่มี KO) — รวมถึง "KO barrier"/"Knock-Out Barrier" ด้วย ต้องกรอกแม้เอกสารจะมี Participation Rate อยู่ด้วยก็ตาม (สองอย่างนี้อยู่ร่วมกันได้ เช่นใน Sharkfin)
@@ -91,6 +93,14 @@ function num(v: unknown): number | null {
 function str(v: unknown): string | null {
   return typeof v === 'string' && v.trim() ? v.trim() : null
 }
+// "100%" / "75.5 %" → 75.5. Deliberately refuses anything that isn't a single clean
+// percentage — a range like "70–75.5%" has no one level, so the caller keeps its null and
+// the UI shows "—" instead of silently picking an end of the range.
+function pctFromText(v: string | null): number | null {
+  if (!v) return null
+  const m = v.trim().match(/^(\d+(?:\.\d+)?)\s*%/)
+  return m ? Number(m[1]) : null
+}
 function strArr(v: unknown): string[] {
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map((x) => x.trim()) : []
 }
@@ -150,18 +160,24 @@ function tenorToMonths(tenor: string | null): number | null {
 function fromObject(p: Record<string, unknown>, raw: string, sourceFile: string, id: string): NoteProduct {
   const market: MarketHint = p.market === 'thai' ? 'thai' : 'foreign'
   const tenor = str(p.tenor)
-  const strikePct = num(p.strikePct)
-  const kiPct = num(p.kiPct)
-  const koPct = num(p.koPct)
-  const couponPa = num(p.couponPa)
   const variantFields = parseVariantFields(p.variantFields)
+  // The model sometimes fills only the factsheet-side string ("100%") and leaves the numeric
+  // top-level field null. Both come from the SAME document line, so read the string as the
+  // fallback — otherwise Strike/KO/KI prices and the KO backtest silently drop out even
+  // though the term sheet stated the level.
+  const strikePct = num(p.strikePct) ?? pctFromText(variantFields?.strike ?? null)
+  const kiPct = num(p.kiPct) ?? pctFromText(variantFields?.knockIn ?? null)
+  const koPct = num(p.koPct) ?? pctFromText(variantFields?.ko ?? null)
+  const couponPa = num(p.couponPa) ?? pctFromText(variantFields?.coupon ?? null)
   return {
     id,
     productCode: str(p.productCode),
+    productName: str(p.productName),
     issuer: str(p.issuer),
     underlyings: strArr(p.underlyings).map((s) => s.toUpperCase()),
     initialPrices: numArr(p.initialPrices),
     market,
+    notional: num(p.notional),
     structureType: structureOf(variantFields, { koPct, kiPct, strikePct, couponPa }),
     strikePct,
     kiPct,
@@ -218,8 +234,12 @@ export function parseNoteProducts(raw: string, sourceFile: string, mkId: () => s
       const prod = fromObject(p, JSON.stringify(p), sourceFile, mkId())
       // Batch products rarely carry a real product code, so the shared source label
       // ("ข้อความ #1") would be the display name for all of them. Derive a distinct,
-      // readable name from the structure + underlyings instead.
-      if (!prod.productCode) prod.sourceFile = `${STRUCTURE_TYPE_LABELS[prod.structureType]} (${prod.underlyings.join('/')})`
+      // readable name from the structure + underlyings instead — but ONLY when the document
+      // named nothing itself: a listing that prints "BANGKOK DUSIT MED SERVICE (BDMS)" keeps
+      // that exact name rather than being re-labelled "KIKO (BDMS)".
+      if (!prod.productCode && !prod.productName) {
+        prod.sourceFile = `${STRUCTURE_TYPE_LABELS[prod.structureType]} (${prod.underlyings.join('/')})`
+      }
       return prod
     })
     .filter((p) => p.underlyings.length > 0) // drop empty/garbage entries

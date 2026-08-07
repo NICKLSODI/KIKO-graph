@@ -112,6 +112,9 @@ export const REGISTRY = {"kiko": {"arch": "basket", "illus": false, "order": 1, 
 ================================================================== */
 const KH2_CSS = `<style>
 .kh2 .product-tag{margin-bottom:10px;font-size:12px;padding:5px 13px}
+.kh2 .meta.net-hl{background:linear-gradient(180deg,#EDFAF2,#D3F0E0);border:2px solid #1E6B40}
+.kh2 .meta.net-hl .meta-label{color:#14562F;font-weight:700}
+.kh2 .meta.net-hl .meta-value{color:#12703F;font-size:21px;font-weight:700}
 .kh2 .meta.coupon-hl{background:linear-gradient(180deg,#FFF9EC,#FFF3D6);border:1.5px solid #EBB94D}
 .kh2 .meta.coupon-hl .meta-label{color:#9a7d28;font-weight:700}
 .kh2 .meta.coupon-hl .meta-value{color:#B8860B;font-size:16px;font-weight:600}
@@ -396,6 +399,187 @@ function _underlyingNames(p,lang){
   return `<div class="ul-grid">`+names.map(n=>`<div class="ul-item">${n}</div>`).join('')+`</div>`;
 }
 
+/* ==================================================================
+   KIKO client sheet — dedicated landscape layout (desk-approved design)
+   ------------------------------------------------------------------
+   KIKO no longer shares the KH2 body: it prints a navy hero, three
+   headline tiles (Notional / Net Interest per Month / Coupon), a chip
+   row of dates & terms, then the basket in the term-sheet's
+   Spot / Strike / KO / KI money layout and the coupon schedule.
+   The prose "how the payoff works" / spot-provenance notes are gone —
+   the table states the same levels, and the desk asked for numbers only.
+================================================================== */
+const KIKO_SHEET_CSS = `<style>
+@page{size:A4 landscape;margin:0}
+.page.ks{width:1123px;min-height:0;padding:16px 26px 18px;background:#EFF4F9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#12294B}
+.ks-hero{background:#1B3B6B;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:13px 20px}
+.ks-hero-t{color:#fff;font-size:31px;font-weight:800;letter-spacing:.2px;line-height:1.1}
+.ks-ul{display:block;height:4px;width:78%;margin-top:4px;border-radius:2px;background:linear-gradient(90deg,#F0821E 0 50%,#3F8AE0 50% 100%)}
+.ks-hero-tags{background:#fff;color:#1B3B6B;font-size:19px;font-weight:800;border-radius:7px;padding:8px 20px;white-space:nowrap}
+.ks-flag{margin-top:9px;background:#FFF5F3;border:1px solid #E0B0A8;color:#7A2018;border-radius:7px;padding:7px 13px;font-size:14.5px;font-weight:600}
+.ks-tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:9px}
+.ks-tile{background:#fff;border:1px solid #D6E0EC;border-radius:8px;padding:8px 15px}
+.ks-tile.cp{border-left:6px solid #F0821E}
+.ks-tl{font-size:14px;font-weight:800;color:#1B3B6B;text-transform:uppercase;letter-spacing:.5px}
+.ks-tile.cp .ks-tl{color:#E8821E}
+.ks-tv{font-size:25px;font-weight:800;color:#12294B;margin-top:4px;line-height:1.15}
+.ks-tile.cp .ks-tv{font-size:33px;color:#F0821E}
+.ks-pa{font-size:16px;font-weight:700;color:#33475F;margin-left:7px}
+.ks-chips{display:flex;gap:11px;flex-wrap:wrap;margin-top:9px}
+.ks-chip{flex:1 1 0;min-width:145px;text-align:center;background:#E3EBF4;border-radius:7px;padding:7px 12px;font-size:15px;color:#3B4E68;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ks-sec{background:#DCE7F3;border-radius:7px;padding:6px 17px;font-size:20px;font-weight:800;color:#1B3B6B;margin:9px 0 6px}
+.ks-tbl{width:100%;border-collapse:collapse;background:#fff;border-radius:9px;overflow:hidden;font-size:16px}
+.ks-tbl thead tr{background:#1B3B6B}
+.ks-tbl th{color:#fff;font-size:15px;font-weight:800;padding:12px 9px;text-align:center;line-height:1.35}
+.ks-tbl th:first-child{text-align:center}
+.ks-tbl td{padding:12px 9px;text-align:center;border-bottom:1px solid #E6ECF3;color:#12294B}
+.ks-tbl tbody tr:last-child td{border-bottom:none}
+.ks-nm{font-weight:600}
+.ks-sp{font-weight:800}
+.ks-tbl td.ks-st{background:#FFF6C9;color:#7A5900;font-weight:800}
+.ks-tbl td.ks-ko{background:#E6F6EE;color:#0A6B40;font-weight:800}
+.ks-tbl td.ks-ki{background:#FBE7E4;color:#A32218;font-weight:800}
+.ks-tbl td.ks-ref{color:#3B4E68;font-weight:500}
+.ks-hp{display:block;font-size:13px;font-weight:700;opacity:.85;margin-top:3px}
+.ks-calc{margin-top:9px;font-size:17px;font-weight:800;color:#12294B;padding-bottom:8px;border-bottom:3px solid #1B3B6B}
+.ks-tbl.ks-sch thead tr{background:#E3EBF4}
+.ks-tbl.ks-sch th{color:#1B3B6B;font-size:14px;padding:11px 9px}
+.ks-tbl.ks-sch td{padding:9px;font-size:15px}
+.ks-tbl.ks-sch td.ks-per{font-weight:800;color:#1B3B6B}
+.ks-tbl.ks-sch td.ks-amt{font-weight:800;color:#128257}
+.ks-note{margin-top:6px;font-size:13px;color:#54677E;line-height:1.45}
+.ks-foot{display:flex;justify-content:space-between;align-items:flex-end;gap:20px;margin-top:10px;border-top:1px solid #C9D6E5;padding-top:9px}
+.ks-foot-t{font-size:10.5px;color:#8494A8;line-height:1.35}
+</style>`;
+
+// Column roles in a Spot-based basket, read off the English headers (same convention as _basketKH2).
+function _ksRoles(cE){
+  const role={};
+  for(let i=1;i<cE.length;i++){ const c=cE[i].toLowerCase(), si=i-1;
+    if(/spot/.test(c)) role.spot=si;
+    else if(/strike/.test(c)) role.strike=si;
+    else if(/knock-out/.test(c)) role.ko=si;
+    else if(/knock-in level/.test(c)) role.kilvl=si;
+    else if(/knock-in/.test(c)) role.ki=si;
+    else if(/shares/.test(c)) role.shares=si; }
+  return role;
+}
+// "CPALL-R TB" → "CPALL" — the hero chip lists plain tickers, the table keeps the full code.
+function _ksTicker(u){ return String(u||'').trim().split(/[\s\-/]/)[0] || String(u||''); }
+
+function _kikoSheet(p,lang,wht){
+  const L=(en,th)=>lang==='en'?en:th;
+  const bk=p.kh2_basket||p.basket;
+  const rows=bk?bk.groups.reduce((a,g)=>a.concat(g[1]),[]):[];
+  const role=bk?_ksRoles(bk.cols_en):{};
+  const lv=p._levels||{};
+  const at=(v,i)=>(i!=null&&v[i]!=null)?v[i]:'';
+  const pctOf=(money,spot)=>{const t=_num(money),s=_num(spot);return (t!=null&&s)?(t/s*100).toFixed(2)+'%':'';};
+
+  // --- headline tiles -------------------------------------------------------
+  const mNot=p.metrics.find(x=>/subscription|notional/i.test(x.l.en));
+  const mNet=p.metrics.find(x=>/interest\s*\/\s*month/i.test(x.l.en));
+  const mCoupon=p.metrics.find(x=>/coupon/i.test(x.l.en))||p.metrics[0];
+  const mTenor=p.metrics.find(x=>/tenor/i.test(x.l.en));
+  const used=new Set([mNot,mNet,mCoupon,mTenor].filter(Boolean));
+  const spare=p.metrics.filter(x=>!used.has(x));
+  // Notional + Net Interest are the two the desk leads with; when a deal carries neither
+  // (illustrative template), the next metrics fill the slots so the row is never half-empty.
+  const lead=[];
+  if(mNot) lead.push({l:L('Notional','เงินลงทุน (Notional)'),v:mNot.v});
+  if(mNet) lead.push({l:mNet.l[lang],v:mNet.v});
+  while(lead.length<2 && spare.length){ const m=spare.shift(); lead.push({l:m.l[lang],v:m.v}); }
+  const couponRaw=(mCoupon&&mCoupon.v)||lv.coupon||'—';
+  const couponVal=couponRaw.replace(/\s*(p\.a\.?)\s*$/i,'<span class="ks-pa">$1</span>');
+  const tiles=lead.map(t=>`<div class="ks-tile"><div class="ks-tl">${t.l}</div><div class="ks-tv">${t.v}</div></div>`).join('')
+    +`<div class="ks-tile cp"><div class="ks-tl">${L('Coupon','คูปอง')}</div><div class="ks-tv">${couponVal}</div></div>`;
+
+  // --- chip row: the dates the deal actually states, plus tenor & currency ---
+  const cur=(bk&&bk.cur)||(String((mNot&&mNot.v)||'').match(/^([A-Za-z]{3})/)||[])[1]||'THB';
+  const chips=[];
+  if(p.dates) for(const [de,dt,v] of p.dates) chips.push(`${lang==='en'?de:dt}: ${v}`);
+  if(mTenor) chips.push(`${L('Tenor','อายุตราสาร')}: ${mTenor.v}`);
+  chips.push(`${L('Currency','สกุลเงิน')}: ${cur}`);
+
+  const schedRows=p.schedule?(p.schedule.rows||(p.schedule.rows_lang&&p.schedule.rows_lang[lang])||[]):[];
+
+  let s=`<div class="page ks">`
+    +`<div class="ks-hero"><div><div class="ks-hero-t">${L('Structured Products','Structured Products')}<span class="ks-ul"></span></div></div>`
+    +(rows.length?`<div class="ks-hero-tags">${rows.map(r=>_ksTicker(r[0])).join(' / ')}</div>`:'')
+    +`</div>`;
+  // Compliance flags from the source document (e.g. Reverse Solicit) — never dropped.
+  if(p._dealNotes&&p._dealNotes.length) s+=`<div class="ks-flag">${p._dealNotes.map(n=>n[lang]).join(' &nbsp;·&nbsp; ')}</div>`;
+  s+=`<div class="ks-tiles">${tiles}</div>`
+    +`<div class="ks-chips">${chips.map(c=>`<div class="ks-chip">${c}</div>`).join('')}</div>`;
+
+  // --- 1) basket ------------------------------------------------------------
+  let sec=0;
+  if(bk){
+    sec++;
+    const hasSpot=role.spot!=null;
+    // Header percentages come from the deal's stated levels; for the illustrative template
+    // (no _levels) they are read back off the first row's money-vs-spot ratio.
+    const r0=rows[0]?rows[0].slice(2):[];
+    const pStrike=lv.strike||pctOf(at(r0,role.strike),at(r0,role.spot));
+    const pKo=lv.ko||pctOf(at(r0,role.ko),at(r0,role.spot));
+    const pKi=lv.ki||at(r0,role.kilvl)||pctOf(at(r0,role.ki),at(r0,role.spot));
+    // The % sits on its OWN line under the column name — on one line the reader had to
+    // pick the level out of a long header ("Strike Price (95%)").
+    const sfx=v=>v?`<span class="ks-hp">(${v})</span>`:'';
+    const heads=lang==='en'
+      ?['Underlying Stocks',`Reference Spot`,`Strike Price${sfx(pStrike)}`,`KO Barrier${sfx(pKo)}`,`KI Barrier${sfx(pKi)}`,'Coupon','Price Reference']
+      :['หลักทรัพย์อ้างอิง',`ราคาอ้างอิง<span class="ks-hp">(Spot)</span>`,`ราคาใช้สิทธิ${sfx(pStrike)}`,`KO Barrier${sfx(pKo)}`,`KI Barrier${sfx(pKi)}`,'คูปอง','ที่มาของราคา'];
+    const couponCell=(lv.coupon||couponRaw||'—').replace(/\s*p\.a\.?\s*$/i,'');
+    const ref=hasSpot?L('Spot provided','ใช้ราคา Spot ที่ระบุ'):L('% of Initial','% ของราคาเริ่มต้น');
+    s+=`<div class="ks-sec">${sec}) ${L('Basket Securities &amp; Delivery Terms','หลักทรัพย์อ้างอิง &amp; เงื่อนไขการส่งมอบ')}</div>`
+      +`<table class="ks-tbl"><thead><tr>${heads.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>`;
+    for(const row of rows){
+      const v=row.slice(2);
+      // Money levels when spots were supplied; otherwise the stated % levels stand in.
+      const spot=hasSpot?at(v,role.spot):'—';
+      const strike=hasSpot?at(v,role.strike):(lv.strike||at(v,role.strike)||'—');
+      const ko=hasSpot?at(v,role.ko):(lv.ko||at(v,role.ko)||'—');
+      const ki=hasSpot?at(v,role.ki):(lv.ki||at(v,role.kilvl)||'—');
+      s+=`<tr><td class="ks-nm">${row[0]}</td><td class="ks-sp">${spot}</td>`
+        +`<td class="ks-st">${strike}</td><td class="ks-ko">${ko}</td><td class="ks-ki">${ki}</td>`
+        +`<td class="ks-sp">${couponCell}</td><td class="ks-ref">${ref}</td></tr>`;
+    }
+    s+=`</tbody></table>`;
+    // Shares for delivery are stated per underlying only when a notional fixes them.
+    if(role.shares!=null&&rows.some(r=>String(r.slice(2)[role.shares]||'').trim())){
+      const parts=rows.map(r=>`${r[0]} ${String(r.slice(2)[role.shares]||'—')}`).join(' &nbsp;·&nbsp; ');
+      s+=`<div class="ks-note"><b>${L('Shares for Delivery','จำนวนหุ้นส่งมอบ')}:</b> ${parts}</div>`;
+    }
+  }
+
+  // --- calculation line (how the monthly interest tile was reached) ----------
+  if(mNet&&mNot){
+    const notN=_num(mNot.v), coupN=_num(couponRaw);
+    if(notN!=null&&coupN!=null){
+      const taxed=/net/i.test(mNet.l.en);
+      const net=notN*coupN/100/12*(taxed?1-wht/100:1);
+      const whtStep=taxed?` x (1 - ${wht}% WHT)`:'';
+      s+=`<div class="ks-calc">${L('Calculation','วิธีคำนวณ')}: ${cur} ${notN.toLocaleString('en-US')} x ${coupN}% / 12${whtStep} = ${cur} ${net.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})} ${L('per month','ต่อเดือน')}</div>`;
+    }
+  }
+
+  // --- 2) coupon schedule ---------------------------------------------------
+  if(schedRows.length){
+    sec++;
+    s+=`<div class="ks-sec">${sec}) ${p.schedule.head[lang]}</div>`
+      +`<table class="ks-tbl ks-sch"><thead><tr>${p.schedule.cols[lang].map(c=>`<th>${c}</th>`).join('')}</tr></thead><tbody>`;
+    for(const r of schedRows){
+      s+='<tr>'+r.map((v,i)=>`<td class="${i===0?'ks-per':(i===r.length-1?'ks-amt':'')}">${v}</td>`).join('')+'</tr>';
+    }
+    s+=`</tbody></table>`;
+    if(p._scheduleNote) s+=`<div class="ks-note">${p._scheduleNote[lang]}</div>`;
+  }
+
+  // Disclaimer only — the desk asked for no issuing-house line on this sheet.
+  s+=`<div class="ks-foot"><div class="ks-foot-t">${LABELS.foot[lang]}</div></div>`;
+  return s+'</div>';
+}
+
 export function buildFactsheetKH(pk, lang, opts={}){
   // pk may be a REGISTRY key (curated Sale-Kit example) OR a data object built from a
   // real term sheet — same shape as a REGISTRY entry, carrying a `_type` field (the
@@ -409,6 +593,10 @@ export function buildFactsheetKH(pk, lang, opts={}){
   const basketRows = p.basket ? p.basket.groups.reduce((n,g)=>n+g[1].length+(g[0]?1:0),0) : 0;
   const schedRowsPre = p.schedule ? (p.schedule.rows || (p.schedule.rows_lang && p.schedule.rows_lang[lang]) || []).length : (p.coupon_kh?p.coupon_kh.length:0);
   const contentRows = basketRows + schedRowsPre;
+  // KIKO prints landscape with large type (see KH2_LANDSCAPE_CSS). Its own vertical-fill
+  // classes are skipped there — the landscape page is short and already full.
+  // KIKO prints its own sheet (hero + tiles + chips + basket), not the shared KH2 body.
+  if(pk === 'kiko') return [CSS, KIKO_SHEET_CSS, _kikoSheet(p,lang,wht)].join('');
   const fillClass = contentRows<=4 ? ' kh2-fill-lg' : (contentRows<=7 ? ' kh2-fill-md' : '');
   let s=[CSS, KH2_CSS, `<div class="page kh kh2${fillClass}">`];
   s.push(_headerKH2(p,lang));
@@ -425,14 +613,33 @@ export function buildFactsheetKH(pk, lang, opts={}){
   // across every product instead of relying on a label-text match.
   const couponMetric = p.metrics[0];
   const notional = (p.metrics.find(x=>/subscription|notional/i.test(x.l.en))||{}).v || '';
-  const netIntMetric = p.metrics.find(x=>/net interest/i.test(x.l.en));
+  // Matches both tiles the deal mapper can emit: "Net Interest / Month" (THB, after WHT)
+  // and "Interest / Month" (other currencies, gross — no Thai WHT asserted).
+  const netIntMetric = p.metrics.find(x=>/interest\s*\/\s*month/i.test(x.l.en));
+  // Interest per month is what the client actually asks about, so when the deal carries one
+  // it gets the strongest box on the page (green net-hl) — louder than the coupon rate.
   s.push('<div class="meta-grid">'+p.metrics.map(x=>{
-    const isC=(x===couponMetric);
+    const isC=(x===couponMetric), isN=(netIntMetric && x===netIntMetric);
     const val=isC ? x.v.replace(/\s*(p\.a\.?)\s*$/i,'<span class="cpa">$1</span>') : x.v;
-    return `<div class="meta${isC?' coupon-hl':''}"><div class="meta-label">${x.l[lang]}</div><div class="meta-value ${isC?'':x.c}">${val}</div></div>`;
+    return `<div class="meta${isC?' coupon-hl':''}${isN?' net-hl':''}"><div class="meta-label">${x.l[lang]}</div><div class="meta-value ${isC||isN?'':x.c}">${val}</div></div>`;
   }).join('')+'</div>');
   if(p.dates){
     s.push('<div class="meta-grid" style="margin-bottom:0">'+p.dates.map(([de,dt,v])=>`<div class="meta"><div class="meta-label">${lang==='en'?de:dt}</div><div class="meta-value sm">${v}</div></div>`).join('')+'</div>');
+  }
+  // How that headline number was reached — printed right under the tiles, so it is on the
+  // sheet even for products that render no coupon-schedule section further down.
+  if(netIntMetric){
+    const notN=_num(notional), coupN=couponMetric?_num(couponMetric.v):null;
+    // Currency comes from the subscription tile itself ("THB 1,000,000" / "USD 30,000"), and
+    // the WHT step is shown only when the tile says "Net" — a gross figure must not carry a
+    // tax line, and a non-THB deal must not be captioned in baht.
+    const cur=(String(notional).trim().match(/^([A-Za-z]{3})/)||[])[1] || 'THB';
+    const taxed=/net/i.test(netIntMetric.l.en);
+    if(notN!=null && coupN!=null){
+      const net=notN*coupN/100/12*(taxed?1-wht/100:1);
+      const whtStep=taxed?` × (1 − ${wht}% WHT)`:'';
+      s.push(`<div class="calc-line"><b>${L('Calculation','วิธีคำนวณ')}:</b> ${cur} ${notN.toLocaleString('en-US')} × ${coupN.toFixed(1)}% / 12${whtStep} = <b>${cur} ${net.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</b> ${L('per month','ต่อเดือน')}</div>`);
+    }
   }
 
   let sec=0;
@@ -469,9 +676,7 @@ export function buildFactsheetKH(pk, lang, opts={}){
         `<b>วิธีคิดผลตอบแทน:</b> ถ้าราคา${dir} KO Level (${ko}) → รับ Participation สูงสุด <b>${cap}</b> · ถ้าเคยแตะ ${ko} (Knock-Out) → รับ <b>KO Rebate ${reb}</b> แทน · ถ้าราคา${dirNo} → คืนเงินต้นเต็ม 100%`);
       s.push(`<div class="calc-line">${note}</div>`);
     }
-    // Basket provenance note (e.g. spot = latest close, levels calculated) — shown first.
-    if(p._basketNote) s.push(`<div class="calc-line">${p._basketNote[lang]}</div>`);
-    // Data-object payoff note (e.g. real KIKO deals) — bilingual {en,th} carried on the data.
+    // Data-object payoff note (bilingual {en,th} carried on the data).
     if(p._payoffNote) s.push(`<div class="calc-line">${p._payoffNote[lang]}</div>`);
   };
   const pushCondsOrLevels=()=>{
@@ -502,13 +707,7 @@ export function buildFactsheetKH(pk, lang, opts={}){
     // Calculated-schedule caveat (real deals only — e.g. dates derived from Issue Date
     // + stated observation frequency rather than taken verbatim from the term sheet).
     if(p._scheduleNote) s.push(`<div class="calc-line">${p._scheduleNote[lang]}</div>`);
-    if(netIntMetric){
-      const notN=_num(notional), coupN=couponMetric?_num(couponMetric.v):null;
-      if(notN!=null && coupN!=null){
-        const net=notN*coupN/100/12*(1-wht/100);
-        s.push(`<div class="calc-line"><b>${L('Calculation','วิธีคำนวณ')}:</b> THB ${notN.toLocaleString('en-US')} × ${coupN.toFixed(1)}% / 12 × (1 − ${wht}% WHT) = <b>THB ${net.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</b> ${L('per month','ต่อเดือน')}</div>`);
-      }
-    }
+    // (the "Calculation:" line for interest/month is printed under the metric tiles above)
   } else if(isStyleADone && p.coupon_kh && p.coupon_kh.length){
     sec++;
     s.push(`<div class="sec-num"><span class="badge">${sec}</span>${L('Coupon Schedule','ตารางการจ่ายดอกเบี้ย')}</div>`);
