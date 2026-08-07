@@ -1,5 +1,5 @@
 // Pure product-type classifier, split out of factsheet_generator.js (which also carries the
-// render engine + 26 embedded templates + base64 logo, ~145kB). Kept in its own module so the
+// render engine + 26 embedded templates, ~110kB). Kept in its own module so the
 // main app bundle (extract.ts, used on every page load) can classify a product's structure
 // type WITHOUT pulling that render engine into the eager chunk — only the lazy-loaded
 // Factsheet screen needs the full generator. factsheet_generator.js re-exports this same

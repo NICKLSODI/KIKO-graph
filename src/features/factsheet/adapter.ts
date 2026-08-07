@@ -5,6 +5,7 @@ import { buildFactsheetKH, detectVariant, REGISTRY } from './factsheet_generator
 import { dealToFactsheetData, MAPPED_PRODUCT_KEYS, type Deal } from './deal_factsheet.js'
 import { VF_KEYS, type VariantFields } from './fields'
 import type { NoteProduct } from '../backtest/types'
+import { notionalFor } from '../backtest/types'
 
 const pct = (v: number | null): string | null => (v == null ? null : `${v}%`)
 
@@ -100,12 +101,14 @@ export function renderFactsheet(
 ): FactsheetRender {
   const vf = backfillFromProduct(product.variantFields, product)
   const deal = variantFieldsToDeal(vf)
-  // Notional (optional) lets the mapper add min-subscription + net-interest-after-tax like
-  // the illustrative reference. Currency follows the underlying's market (Thai → THB, else USD).
-  if (notional != null && notional > 0) {
-    deal.notional = notional
-    deal.currency = product.market === 'thai' ? 'THB' : 'USD'
-  }
+  // Notional drives min-subscription + net-interest-after-tax and the shares-for-delivery
+  // column. Priority: what the IC typed → what the document itself stated → the desk's
+  // standard ticket size for that market (THB 1,000,000 / USD 30,000). Without any of them
+  // those rows silently disappeared from exported factsheets.
+  // Currency follows the underlying's market (Thai → THB, else USD).
+  const amount = notional != null && notional > 0 ? notional : notionalFor(product)
+  deal.notional = amount
+  deal.currency = product.market === 'thai' ? 'THB' : 'USD'
   // Latest market closes (from the backtest's price data) — turns the %-only basket into
   // the reference layout with Spot, money levels, and shares-for-delivery.
   if (spots && Object.keys(spots).length) {

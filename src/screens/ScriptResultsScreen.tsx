@@ -71,6 +71,7 @@ export function ScriptResultsScreen({ state, patch, onReset }: { state: AppState
       title="ผลลัพธ์"
       subtitle="แต่ละรูปแบบมีคำสั่งเฉพาะที่อิงตาม Persona และข้อเท็จจริงที่ดึงได้ — สร้างผ่าน Claude Code ไม่ต้องใช้ API key"
       product={state.retrieved?.productName ?? state.selectedProduct?.productCode ?? null}
+      back={{ label: 'ตั้งค่า Output', onClick: () => patch({ screen: 'scriptConfig' }) }}
       onStepClick={(n) => {
         if (n === 1) patch({ screen: 'backtest' })
         if (n === 2) patch({ screen: 'persona' })
@@ -163,7 +164,6 @@ export function ScriptResultsScreen({ state, patch, onReset }: { state: AppState
       </Card>
 
       <FlowNav
-        back={{ label: 'ตั้งค่า Output', onClick: () => patch({ screen: 'scriptConfig' }) }}
         next={{ label: 'เสร็จสิ้น — กลับ Dashboard', onClick: () => patch({ screen: 'backtest' }) }}
         extra={
           <button onClick={onReset} style={{ background: 'none', border: 'none', color: C.muted, fontSize: 12.5, textDecoration: 'underline', cursor: 'pointer' }}>

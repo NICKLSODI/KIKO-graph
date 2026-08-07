@@ -420,6 +420,7 @@ export function FlowShell({
   subtitle,
   product,
   actions,
+  back,
   maxWidth = 680,
   children,
   onStepClick,
@@ -430,8 +431,11 @@ export function FlowShell({
   subtitle?: string
   /** Product code/name being worked on — rendered as a context chip. */
   product?: string | null
-  /** Extra header controls (e.g. a back button) rendered on the right. */
+  /** Extra header controls rendered on the right. */
   actions?: ReactNode
+  /** Back navigation. Every screen puts it in the SAME place — top-left, above the title —
+   *  so there is never a second back button at the bottom of the page to hunt for. */
+  back?: { label: string; onClick: () => void }
   maxWidth?: number
   children: ReactNode
   onStepClick?: (n: number) => void
@@ -439,6 +443,17 @@ export function FlowShell({
   return (
     <Screen maxWidth={maxWidth}>
       {step != null && <Stepper step={step} labels={FLOW_STEPS} onStepClick={onStepClick} />}
+      {back && (
+        <div style={{ marginBottom: 12 }}>
+          <button
+            className="btn-ghost"
+            onClick={back.onClick}
+            style={{ padding: '7px 14px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.text, fontSize: 12.5, cursor: 'pointer' }}
+          >
+            ← {back.label}
+          </button>
+        </div>
+      )}
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
         <div>
           <div style={{ fontSize: 19, fontWeight: 600, color: C.text }}>{title}</div>
@@ -465,24 +480,20 @@ export function FlowShell({
   )
 }
 
-/* ─── Flow nav — the one back/next bar every wizard screen uses.
-   Back is always bottom-left ("← <step>"), the primary action always
-   bottom-right ("<action> →"), with an optional hint explaining why
-   next is disabled. Sticky, so it never scrolls out of reach. ─── */
+/* ─── Flow nav — the forward bar every wizard screen uses. The primary action is always
+   bottom-right ("<action> →"), with an optional hint explaining why next is disabled.
+   Sticky, so it never scrolls out of reach. Going BACK is not here: it lives top-left in
+   FlowShell on every screen, so there is exactly one place to look for it. ─── */
 export function FlowNav({
-  back,
   next,
   extra,
 }: {
-  back?: { label: string; onClick: () => void }
   next?: { label: string; onClick: () => void; disabled?: boolean; hint?: string }
   extra?: ReactNode
 }) {
   return (
     <div className="flow-nav">
-      <div>
-        {back && <NavBtn onClick={back.onClick} secondary>← {back.label}</NavBtn>}
-      </div>
+      <div />
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
         {next?.disabled && next.hint && (
           <span style={{ fontSize: 12.5, color: C.muted }}>{next.hint}</span>

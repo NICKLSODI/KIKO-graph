@@ -57,7 +57,9 @@ const EMA200_COLOR = '#7B6CE0'
 
 // Standard EMA: seed with the period's SMA, then smooth forward. Returns null for the
 // warm-up bars (not enough history yet) so the line only starts once it's meaningful.
-function computeEma(candles: Candle[], period: number): { time: number; value: number }[] {
+// Exported so the interactive-HTML export precomputes the same series instead of shipping
+// a second copy of this formula inside the generated file.
+export function computeEma(candles: Candle[], period: number): { time: number; value: number }[] {
   if (candles.length < period) return []
   const k = 2 / (period + 1)
   const seed = candles.slice(0, period).reduce((sum, c) => sum + c.close, 0) / period

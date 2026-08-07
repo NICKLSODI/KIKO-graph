@@ -75,6 +75,8 @@ const prod1CandlesMSFT = generateMockCandles(300, 220, 303)
 const product1: NoteProduct = {
   id: prod1Id,
   productCode: 'KIKO AAPL/MSFT 12% p.a.',
+  productName: null,
+  notional: null,
   issuer: 'SCB Premium',
   underlyings: ['AAPL', 'MSFT'],
   initialPrices: [150, 300],
@@ -144,6 +146,8 @@ const prod2CandlesCPALL = generateMockCandles(58, 400, 505)
 const product2: NoteProduct = {
   id: prod2Id,
   productCode: 'KIKO PTT/CPALL 9.5% p.a.',
+  productName: null,
+  notional: null,
   issuer: 'KBank Private',
   underlyings: ['PTT', 'CPALL'],
   initialPrices: [34, 58],

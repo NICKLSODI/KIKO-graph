@@ -1,23 +1,23 @@
 import type { BacktestResult, NoteProduct, ProfileKey, ScoredProduct, ScoreWeights } from './types'
 
-export const PROFILE_WEIGHTS: Record<Exclude<ProfileKey, 'custom'>, ScoreWeights> = {
+export const PROFILE_WEIGHTS: Record<ProfileKey, ScoreWeights> = {
   // coupon / buffer / tenor / volatility
+  all: { coupon: 1, buffer: 1, tenor: 1, volatility: 1 }, // neutral — equal weight, the default view
   aggressive: { coupon: 0.6, buffer: 0.15, tenor: 0.15, volatility: 0.1 },
-  balanced: { coupon: 1, buffer: 1, tenor: 1, volatility: 1 },
+  balanced: { coupon: 1, buffer: 1, tenor: 1, volatility: 1 }, // export best-fit only (not in dashboard UI)
   save: { coupon: 0.1, buffer: 0.4, tenor: 0.2, volatility: 0.3 },
 }
 
 export const PROFILE_LABELS: Record<ProfileKey, string> = {
+  all: 'All (ทั้งหมด)',
   aggressive: 'Aggressive (เน้นผลตอบแทน)',
   balanced: 'Balanced (สมดุล)',
-  save: 'Save (เน้นปลอดภัย)',
-  custom: 'Custom (ตั้งน้ำหนักเอง)',
+  // Label reads "Safe"; the key stays `save` because it's persisted in sessions/CSV headers.
+  save: 'Safe (เน้นปลอดภัย)',
 }
 
-export const DEFAULT_CUSTOM_WEIGHTS: ScoreWeights = { coupon: 1, buffer: 1, tenor: 1, volatility: 1 }
-
-export function weightsFor(profile: ProfileKey, custom: ScoreWeights): ScoreWeights {
-  return profile === 'custom' ? custom : PROFILE_WEIGHTS[profile]
+export function weightsFor(profile: ProfileKey): ScoreWeights {
+  return PROFILE_WEIGHTS[profile]
 }
 
 // Min-max normalise to 0..1; null stays null (treated as neutral 0.5 at scoring time).

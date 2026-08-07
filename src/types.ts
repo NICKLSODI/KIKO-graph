@@ -19,8 +19,9 @@ export interface Level {
 
 export const LEVEL_COLORS: Record<LevelKind, string> = {
   strike: '#378ADD',
-  'knock-in': '#639922',
-  'knock-out': '#E24B4A',
+  // KI = red (the downside/"bad" barrier), KO = green (upside autocall) — swapped per desk request.
+  'knock-in': '#E24B4A',
+  'knock-out': '#639922',
 }
 
 export const LEVEL_LABELS: Record<LevelKind, string> = {

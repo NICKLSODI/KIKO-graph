@@ -53,6 +53,7 @@ export const IconHelpCircle = make(<><circle cx="12" cy="12" r="10" /><path d="M
 export const IconUsers = make(<><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></>)
 export const IconSparkles = make(<><path d="M9.9 2.6 11.2 6a1 1 0 0 0 .6.6l3.4 1.3a1 1 0 0 1 0 1.9L11.8 11a1 1 0 0 0-.6.6l-1.3 3.4a1 1 0 0 1-1.9 0l-1.3-3.4a1 1 0 0 0-.6-.6L2.7 9.7a1 1 0 0 1 0-1.9l3.4-1.3a1 1 0 0 0 .6-.6l1.3-3.4a1 1 0 0 1 1.9 0z" /><path d="M20 3v4" /><path d="M22 5h-4" /><path d="M4 17v2" /><path d="M5 18H3" /></>)
 export const IconUpload = make(<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m17 8-5-5-5 5" /><path d="M12 3v12" /></>)
+export const IconDownload = make(<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m7 10 5 5 5-5" /><path d="M12 15V3" /></>)
 export const IconLink = make(<><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></>)
 export const IconAlignLeft = make(<><path d="M15 12H3" /><path d="M17 18H3" /><path d="M21 6H3" /></>)
 export const IconSearch = make(<><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></>)

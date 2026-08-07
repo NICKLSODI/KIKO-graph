@@ -5,7 +5,7 @@ import { ScriptConfigScreen } from './screens/ScriptConfigScreen'
 import { ScriptResultsScreen } from './screens/ScriptResultsScreen'
 import { BacktestDashboard } from './screens/backtest/BacktestDashboard'
 
-// Lazy: the factsheet render engine (templates + embedded logo) is ~160 kB of source that
+// Lazy: the factsheet render engine (templates) is ~110 kB of source that
 // only the Factsheet screen needs — keep it out of the dashboard's initial chunk.
 const FactsheetScreen = lazy(() => import('./screens/FactsheetScreen').then((m) => ({ default: m.FactsheetScreen })))
 
